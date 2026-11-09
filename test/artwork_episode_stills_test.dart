@@ -1,0 +1,337 @@
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:kniephos/core/net/app_http.dart';
+import 'package:kniephos/models/user_data.dart';
+import 'package:kniephos/services/artwork/artwork_service.dart';
+
+void main() {
+  group('季号与集号解析', () {
+    test('中文季号 / 英文季号 / Sxx', () {
+      expect(ArtworkService.seasonHintOf('进击的巨人 第二季'), 2);
+      expect(ArtworkService.seasonHintOf('进击的巨人 第12季'), 12);
+      expect(ArtworkService.seasonHintOf('Some Show Season 3'), 3);
+      expect(ArtworkService.seasonHintOf('Show S02'), 2);
+      expect(ArtworkService.seasonHintOf('无季号'), isNull);
+    });
+
+    test('站点剧集名提取集号', () {
+      expect(ArtworkService.episodeNumber('第3集'), 3);
+      expect(ArtworkService.episodeNumber('第12话'), 12);
+      expect(ArtworkService.episodeNumber('EP03'), 3);
+      expect(ArtworkService.episodeNumber('03'), 3);
+      expect(ArtworkService.episodeNumber('正片'), -1);
+      expect(ArtworkService.episodeNumber('The.Covenant.2006.1080p.x264'), -1);
+      expect(
+        ArtworkService.episodeNumber('[2.04GB] The.Covenant.2006.108...'),
+        -1,
+      );
+    });
+
+    test('片名归一与候选', () {
+      expect(
+        ArtworkService.cleanMetadataTitle(
+          '[2.04GB] The.Covenant.2006.1080p.BluRay',
+        ),
+        'The Covenant',
+      );
+      expect(ArtworkService.cleanMetadataTitle('犯罪都市(日本版)'), '犯罪都市');
+      expect(ArtworkService.titleCandidates('犯罪都市(日本版)'), contains('犯罪都市'));
+      expect(ArtworkService.titleCandidates('葬送的芙莉莲 第二季'), contains('葬送的芙莉莲'));
+      expect(ArtworkService.metadataYear('The.Covenant.2006.1080p'), '2006');
+    });
+
+    test('从资源名提取真正剧名', () {
+      expect(ArtworkService.dramaTitle('XXX【甄彩】'), 'XXX');
+      expect(ArtworkService.dramaTitle('20261026【玉置秋】直播 丞磊徐若晗'), '玉置秋');
+      expect(ArtworkService.dramaTitle('《玉置秋》尺度好大…'), '玉置秋');
+      expect(ArtworkService.dramaTitle('「丞磊」玉置秋/虞昶轩/天后之后'), '玉置秋');
+      expect(
+        ArtworkService.dramaTitle('The.Covenant.2006.1080p'),
+        'The Covenant',
+      );
+    });
+
+    test('结尾续作数字只在分集刮削时当季号', () {
+      expect(
+        ArtworkService.seasonHintOf('赛博朋克：边缘行者 2', trailingSequel: true),
+        2,
+      );
+      expect(ArtworkService.seasonHintOf('赛博朋克：边缘行者 2'), isNull);
+      expect(
+        ArtworkService.seasonHintOf('赛博朋克 2077', trailingSequel: true),
+        isNull,
+      );
+      expect(ArtworkService.seasonHintOf('高达00', trailingSequel: true), isNull);
+      expect(ArtworkService.seasonHintOf('Some Show 2nd Season'), 2);
+      expect(ArtworkService.seasonHintOf('线路2'), isNull);
+    });
+
+    test('片名匹配键折叠标点 / 配音版本，但保留季与篇章', () {
+      expect(
+        ArtworkService.titleMatchKey('鬼灭之刃 中配版'),
+        ArtworkService.titleMatchKey('鬼灭之刃'),
+      );
+      expect(
+        ArtworkService.titleMatchKey('SPY×FAMILY'),
+        ArtworkService.titleMatchKey('SPY FAMILY'),
+      );
+      expect(
+        ArtworkService.titleMatchKey('鬼灭之刃 柱训练篇'),
+        isNot(ArtworkService.titleMatchKey('鬼灭之刃')),
+      );
+      expect(
+        ArtworkService.episodeTitleCandidates('赛博朋克：边缘行者 2'),
+        contains('赛博朋克：边缘行者'),
+      );
+    });
+  });
+
+  group('TMDB 季映射', () {
+    final seasons = [
+      {'season_number': 1, 'episode_count': 12},
+      {'season_number': 2, 'episode_count': 12},
+      {'season_number': 3, 'episode_count': 24},
+    ];
+
+    test('季号提示优先', () {
+      expect(ArtworkService.pickSeasons(seasons, 12, 2), [2]);
+      expect(ArtworkService.pickSeasons(seasons, 24, 3), [3]);
+    });
+
+    test('集数唯一匹配', () {
+      expect(ArtworkService.pickSeasons(seasons, 12, null), isEmpty);
+      expect(ArtworkService.pickSeasons(seasons, 24, null), [3]);
+    });
+
+    test('多季集数之和一致', () {
+      expect(
+        ArtworkService.pickSeasons(
+          [
+            {'season_number': 1, 'episode_count': 12},
+            {'season_number': 2, 'episode_count': 12},
+          ],
+          24,
+          null,
+        ),
+        [1, 2],
+      );
+    });
+
+    test('单季更新中只取前 N 集', () {
+      expect(
+        ArtworkService.pickSeasons(
+          [
+            {'season_number': 1, 'episode_count': 24},
+          ],
+          10,
+          null,
+        ),
+        [1],
+      );
+    });
+
+    test('季号提示下更新中 / 连续两季合并', () {
+      expect(
+        ArtworkService.pickSeasons(
+          [
+            {'season_number': 1, 'episode_count': 12},
+            {'season_number': 2, 'episode_count': 12},
+            {'season_number': 3, 'episode_count': 12},
+          ],
+          10,
+          2,
+        ),
+        [2],
+      );
+      expect(
+        ArtworkService.pickSeasons(
+          [
+            {'season_number': 1, 'episode_count': 12},
+            {'season_number': 2, 'episode_count': 12},
+            {'season_number': 3, 'episode_count': 12},
+          ],
+          24,
+          2,
+        ),
+        [2, 3],
+      );
+    });
+  });
+
+  group('B 站分集匹配', () {
+    test('同名续作按季号选中正确条目', () async {
+      var requestedSeasonId = 0;
+      final client = MockClient((request) async {
+        final path = request.url.path;
+        if (path.contains('/x/frontend/finger/spi')) {
+          return http.Response(
+            jsonEncode({
+              'code': 0,
+              'data': {'b_3': 'b3', 'b_4': 'b4'},
+            }),
+            200,
+          );
+        }
+        if (path.contains('/x/web-interface/search/type')) {
+          return http.Response(
+            jsonEncode({
+              'code': 0,
+              'data': {
+                'result': [
+                  {
+                    'title': 'Dandadan Season 2',
+                    'org_title': 'Dandadan 2nd Season',
+                    'season_id': 101,
+                    'ep_size': 2,
+                    'pubtime': 1750000000,
+                  },
+                  {
+                    'title': 'Dandadan',
+                    'org_title': 'Dandadan',
+                    'season_id': 100,
+                    'ep_size': 2,
+                    'pubtime': 1690000000,
+                  },
+                ],
+              },
+            }),
+            200,
+          );
+        }
+        if (path.contains('/pgc/view/web/season')) {
+          requestedSeasonId = int.parse(
+            request.url.queryParameters['season_id']!,
+          );
+          return http.Response(
+            jsonEncode({
+              'code': 0,
+              'result': {
+                'episodes': [
+                  {
+                    'title': 'EP01',
+                    'cover': 'https://cdn.example.com/$requestedSeasonId/1.jpg',
+                  },
+                  {
+                    'title': 'EP02',
+                    'cover': 'https://cdn.example.com/$requestedSeasonId/2.jpg',
+                  },
+                ],
+              },
+            }),
+            200,
+          );
+        }
+        return http.Response('{}', 404);
+      });
+      final service = ArtworkService(
+        AppHttp(client: client),
+        () => const PlayerSettings(),
+      );
+
+      final season2 = await service.episodeStills(
+        'Dandadan Season 2',
+        episodeCount: 2,
+        episodeNumbers: const [1, 2],
+      );
+      expect(requestedSeasonId, 101);
+      expect(season2, [
+        'https://cdn.example.com/101/1.jpg',
+        'https://cdn.example.com/101/2.jpg',
+      ]);
+
+      final season1 = await service.episodeStills(
+        'Dandadan',
+        episodeCount: 2,
+        episodeNumbers: const [1, 2],
+      );
+      expect(requestedSeasonId, 100);
+      expect(season1, [
+        'https://cdn.example.com/100/1.jpg',
+        'https://cdn.example.com/100/2.jpg',
+      ]);
+    });
+  });
+
+  group('TMDB 分集封面请求', () {
+    test('按集号回填 still，并缓存结果', () async {
+      var requests = 0;
+      final client = MockClient((request) async {
+        requests++;
+        final path = request.url.path;
+        if (path.contains('/search/multi')) {
+          return http.Response(
+            jsonEncode({
+              'results': [
+                {
+                  'media_type': 'tv',
+                  'id': 123,
+                  'name': 'TestShow',
+                  'first_air_date': '2026-01-01',
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        if (path.endsWith('/3/tv/123')) {
+          return http.Response(
+            jsonEncode({
+              'seasons': [
+                {'season_number': 1, 'episode_count': 2},
+              ],
+            }),
+            200,
+          );
+        }
+        if (path.endsWith('/3/tv/123/season/1')) {
+          return http.Response(
+            jsonEncode({
+              'episodes': [
+                {'episode_number': 1, 'still_path': '/a.jpg', 'name': 'Ep1'},
+                {'episode_number': 2, 'still_path': '/b.jpg', 'name': 'Ep2'},
+              ],
+            }),
+            200,
+          );
+        }
+        return http.Response('{}', 404);
+      });
+      final service = ArtworkService(
+        AppHttp(client: client),
+        () => const PlayerSettings(tmdbApiKey: 'test-key'),
+      );
+
+      final stills = await service.episodeStills(
+        'TestShow',
+        year: '2026',
+        episodeCount: 2,
+        episodeNumbers: const [2, 1],
+      );
+      expect(stills, [
+        'https://image.tmdb.org/t/p/w300/b.jpg',
+        'https://image.tmdb.org/t/p/w300/a.jpg',
+      ]);
+
+      final firstRequests = requests;
+      final cached = await service.episodeStills(
+        'TestShow',
+        year: '2026',
+        episodeCount: 2,
+        episodeNumbers: const [2, 1],
+      );
+      expect(cached, stills);
+      expect(requests, firstRequests);
+    });
+
+    test('没有 TMDB Key 时不请求', () async {
+      final service = ArtworkService(
+        AppHttp(client: MockClient((_) async => http.Response('{}', 200))),
+        () => const PlayerSettings(),
+      );
+      expect(await service.episodeStills('TestShow', episodeCount: 2), isEmpty);
+    });
+  });
+}
