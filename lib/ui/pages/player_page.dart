@@ -2281,27 +2281,51 @@ class _PlayerPageState extends State<PlayerPage>
                     style: const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
                   Expanded(
-                    child: SliderTheme(
-                      data: SliderTheme.of(context).copyWith(
-                        trackHeight: 3,
-                        thumbShape: const RoundSliderThumbShape(
-                          enabledThumbRadius: 6,
+                    // 进度条右键：按点击位置直接选取片头 / 片尾。
+                    child: LayoutBuilder(
+                      builder: (barContext, constraints) => Listener(
+                        onPointerDown: (event) {
+                          if (event.kind != PointerDeviceKind.mouse) return;
+                          if ((event.buttons & kSecondaryMouseButton) == 0) {
+                            return;
+                          }
+                          final box =
+                              barContext.findRenderObject() as RenderBox?;
+                          if (box == null || !box.hasSize) return;
+                          unawaited(
+                            _showProgressMenu(
+                              globalPosition: box.localToGlobal(
+                                event.localPosition,
+                              ),
+                              width: constraints.maxWidth,
+                              localDx: event.localPosition.dx,
+                            ),
+                          );
+                        },
+                        child: SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            trackHeight: 3,
+                            thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 6,
+                            ),
+                            overlayShape: const RoundSliderOverlayShape(
+                              overlayRadius: 12,
+                            ),
+                            activeTrackColor: Colors.white,
+                            inactiveTrackColor: Colors.white24,
+                            thumbColor: Colors.white,
+                          ),
+                          child: Slider(
+                            value: value,
+                            max: total.toDouble(),
+                            onChanged: (v) => setState(
+                              () =>
+                                  _position = Duration(milliseconds: v.round()),
+                            ),
+                            onChangeEnd: (v) =>
+                                _seekTo(Duration(milliseconds: v.round())),
+                          ),
                         ),
-                        overlayShape: const RoundSliderOverlayShape(
-                          overlayRadius: 12,
-                        ),
-                        activeTrackColor: Colors.white,
-                        inactiveTrackColor: Colors.white24,
-                        thumbColor: Colors.white,
-                      ),
-                      child: Slider(
-                        value: value,
-                        max: total.toDouble(),
-                        onChanged: (v) => setState(
-                          () => _position = Duration(milliseconds: v.round()),
-                        ),
-                        onChangeEnd: (v) =>
-                            _seekTo(Duration(milliseconds: v.round())),
                       ),
                     ),
                   ),
@@ -3321,6 +3345,121 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
+  /// 进度条右键菜单：按点击位置选取片头 / 片尾。
+  ///
+  /// 片头 = 起播直接跳到的绝对秒数；片尾 = 距结尾还剩多少秒开始跳下一集，
+  /// 与「跳过片头 / 片尾」弹窗里的语义一致，选完立即落盘并对本资源全部剧集生效。
+  Future<void> _showProgressMenu({
+    required Offset globalPosition,
+    required double width,
+    required double localDx,
+  }) async {
+    if (_live) return;
+    final total = _duration.inMilliseconds;
+    if (total <= 0) return;
+    // Slider 的可见轨道两端各内缩 overlay 半径（上面 SliderTheme 设为 12），
+    // 换算前先扣掉这段，点击位置才不会整体偏早。
+    const inset = 12.0;
+    final usable = width - inset * 2 > 1 ? width - inset * 2 : 1.0;
+    final ratio = ((localDx - inset) / usable).clamp(0.0, 1.0);
+    final picked = Duration(milliseconds: (ratio * total).round());
+    final remaining = picked >= _duration ? Duration.zero : _duration - picked;
+
+    final overlay = Overlay.of(context).context.findRenderObject();
+    if (overlay is! RenderBox || !overlay.hasSize) return;
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        PopupMenuItem(
+          value: 'intro',
+          child: _progressMenuRow(
+            Icons.vertical_align_top_rounded,
+            '片头设为 ${_fmt(picked)}',
+          ),
+        ),
+        PopupMenuItem(
+          value: 'outro',
+          child: _progressMenuRow(
+            Icons.vertical_align_bottom_rounded,
+            '片尾设为 ${_fmt(picked)}（剩 ${_fmt(remaining)}）',
+          ),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem(
+          value: 'clear',
+          enabled: _skipIntro > 0 || _skipOutro > 0,
+          child: _progressMenuRow(Icons.close_rounded, '清除片头 / 片尾'),
+        ),
+        PopupMenuItem(
+          value: 'dialog',
+          child: _progressMenuRow(Icons.tune_rounded, '跳过设置…'),
+        ),
+      ],
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'intro':
+        final intro = clampSkipSeconds(picked.inSeconds);
+        if (intro <= 0) {
+          _toast('这个位置等于 0 秒，片头无需跳过');
+          return;
+        }
+        await _saveSkipSegments(intro, _skipOutro);
+        if (!mounted) return;
+        _toast('片头已设为 ${_fmt(picked)}（本资源所有剧集）');
+        if (_position.inSeconds < intro) {
+          _seekTo(Duration(seconds: intro));
+        }
+      case 'outro':
+        final outro = clampSkipSeconds(remaining.inSeconds);
+        // 片尾秒数 ≤1 时本就不会触发跳集（见 shouldSkipOutro），别写个死值进去。
+        if (outro <= 1) {
+          _toast('离结尾太近，请点在更靠前的位置');
+          return;
+        }
+        await _saveSkipSegments(_skipIntro, outro);
+        if (!mounted) return;
+        _toast('片尾已设为 ${_fmt(picked)}（剩 ${_fmt(remaining)}）');
+      case 'clear':
+        await _saveSkipSegments(0, 0);
+        if (!mounted) return;
+        _toast('已清除该资源所有剧集的跳过设置');
+      case 'dialog':
+        await _showSkipSettings();
+    }
+  }
+
+  Widget _progressMenuRow(IconData icon, String label) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(icon, size: 17),
+      const SizedBox(width: 8),
+      Flexible(child: Text(label, overflow: TextOverflow.ellipsis)),
+    ],
+  );
+
+  /// 落盘片头 / 片尾秒数：本资源所有剧集共用一份，并同步播放器内的跳过状态。
+  Future<void> _saveSkipSegments(int intro, int outro) async {
+    await _app.saveSkipSegment(
+      resource: '${_detail.sourceKey}|${_detail.id}',
+      episode: _episodeKey(_index),
+      intro: intro,
+      outro: outro,
+      label: _episodeName.isEmpty ? '第${_index + 1}集' : _episodeName,
+    );
+    if (!mounted) return;
+    setState(() {
+      _skipIntro = intro;
+      _skipOutro = outro;
+      _skipInheritedFrom = '';
+      _outroFired = false;
+    });
+  }
+
   Future<void> _showSkipSettings() async {
     final introCtrl = TextEditingController(
       text: _skipIntro > 0 ? '$_skipIntro' : '',
@@ -3434,27 +3573,13 @@ class _PlayerPageState extends State<PlayerPage>
         ],
       ),
     );
-    final resource = '${_detail.sourceKey}|${_detail.id}';
-    final episodeKey = _episodeKey(_index);
     final intro = action == 'clear' ? 0 : clampSkipSeconds(introCtrl.text);
     final outro = action == 'clear' ? 0 : clampSkipSeconds(outroCtrl.text);
     introCtrl.dispose();
     outroCtrl.dispose();
     if (action == null) return;
-    await _app.saveSkipSegment(
-      resource: resource,
-      episode: episodeKey,
-      intro: intro,
-      outro: outro,
-      label: _episodeName.isEmpty ? '第${_index + 1}集' : _episodeName,
-    );
+    await _saveSkipSegments(intro, outro);
     if (!mounted) return;
-    setState(() {
-      _skipIntro = intro;
-      _skipOutro = outro;
-      _skipInheritedFrom = '';
-      _outroFired = false;
-    });
     if (action == 'clear') {
       _toast('已清除该资源所有剧集的跳过设置');
       return;
