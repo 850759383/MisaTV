@@ -1595,6 +1595,7 @@ class _SiteListState extends State<_SiteList> {
                           )
                         : null,
                     onDiagnose: () => _checkSites(context, [site]),
+                    onToggleSearch: () => _toggleSearch(context, site),
                     onEdit: () => _editSite(context, site),
                     onDelete: () => _deleteSite(context, site),
                   );
@@ -1751,6 +1752,21 @@ class _SiteListState extends State<_SiteList> {
     }
   }
 
+  /// 站点行上的「参与搜索」开关：只改这一个字段，改动即时生效。
+  Future<void> _toggleSearch(BuildContext context, SourceBean site) async {
+    final next = site.searchable != 1;
+    final ok = await widget.app.setSiteSearchable(site.key, next);
+    if (!context.mounted) return;
+    if (!ok) {
+      _settingsSnack(context, '这份配置不是 JSON 订阅，改不了站点');
+      return;
+    }
+    _settingsSnack(
+      context,
+      next ? '「${site.displayName}」已参与搜索' : '「${site.displayName}」已退出搜索',
+    );
+  }
+
   Future<void> _editSite(BuildContext context, SourceBean site) async {
     final edited = await showDialog<SourceBean>(
       context: context,
@@ -1797,7 +1813,10 @@ class _SiteListState extends State<_SiteList> {
   }
 }
 
-/// 编辑单个站点：名称 / 地址 / 类型 / 是否参与搜索，`key` 保持只读。
+/// 编辑单个站点：名称 / 地址 / 类型等字段，`key` 保持只读。
+///
+/// 「参与搜索」不在这里改：站点列表行上直接开关，避免为了改一个布尔值
+/// 打开整张表再保存。
 class _SiteEditDialog extends StatefulWidget {
   const _SiteEditDialog({required this.site});
   final SourceBean site;
@@ -1844,7 +1863,6 @@ class _SiteEditDialogState extends State<_SiteEditDialog> {
   late final TextEditingController _style = TextEditingController(
     text: widget.site.style,
   );
-  late bool _searchable = widget.site.searchable == 1;
   String? _error;
   String? _extError;
   String _extHint = '';
@@ -1917,7 +1935,7 @@ class _SiteEditDialogState extends State<_SiteEditDialog> {
         name: _name.text.trim(),
         type: int.tryParse(_type.text.trim()) ?? source.type,
         api: api,
-        searchable: _searchable ? 1 : 0,
+        searchable: source.searchable,
         quickSearch: source.quickSearch,
         changeable: source.changeable,
         filterable: source.filterable,
@@ -1993,13 +2011,14 @@ class _SiteEditDialogState extends State<_SiteEditDialog> {
                       keyboardType: TextInputType.number,
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  Text('参与搜索', style: theme.textTheme.bodySmall),
-                  Switch(
-                    value: _searchable,
-                    onChanged: (value) => setState(() => _searchable = value),
-                  ),
                 ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '参与搜索：在站点列表点搜索图标切换，改完立即生效',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
+                ),
               ),
               const SizedBox(height: 12),
               TextField(
@@ -2769,11 +2788,13 @@ class _RowIconButton extends StatelessWidget {
     required this.icon,
     required this.tooltip,
     required this.onPressed,
+    this.color,
   });
 
   final IconData icon;
   final String tooltip;
   final VoidCallback onPressed;
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
@@ -2782,7 +2803,7 @@ class _RowIconButton extends StatelessWidget {
       tooltip: tooltip,
       onPressed: onPressed,
       icon: Icon(icon, size: 18),
-      color: theme.colorScheme.onSurface.withValues(alpha: 0.70),
+      color: color ?? theme.colorScheme.onSurface.withValues(alpha: 0.70),
       visualDensity: VisualDensity.compact,
       padding: EdgeInsets.zero,
       constraints: const BoxConstraints.tightFor(width: 34, height: 34),
@@ -3018,6 +3039,7 @@ class _SiteRow extends StatelessWidget {
     required this.onEdit,
     required this.onDelete,
     required this.onDiagnose,
+    required this.onToggleSearch,
     this.onTap,
     this.health,
     this.selecting = false,
@@ -3031,6 +3053,7 @@ class _SiteRow extends StatelessWidget {
   final VoidCallback onEdit;
   final VoidCallback onDelete;
   final VoidCallback onDiagnose;
+  final VoidCallback onToggleSearch;
   final VoidCallback? onTap;
   final bool selecting;
   final bool selected;
@@ -3102,12 +3125,12 @@ class _SiteRow extends StatelessWidget {
                     )
                   else
                     Text(
-                      site.key,
+                      site.searchable == 1 ? site.key : '不参与搜索 · ${site.key}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: theme.textTheme.labelSmall?.copyWith(
                         color: theme.colorScheme.onSurface.withValues(
-                          alpha: 0.4,
+                          alpha: site.searchable == 1 ? 0.4 : 0.62,
                         ),
                       ),
                     ),
@@ -3133,6 +3156,18 @@ class _SiteRow extends StatelessWidget {
               else
                 Icon(Icons.block_rounded, color: theme.disabledColor, size: 18),
               const SizedBox(width: 4),
+              _RowIconButton(
+                icon: site.searchable == 1
+                    ? Icons.search_rounded
+                    : Icons.search_off_rounded,
+                tooltip: site.searchable == 1
+                    ? '参与搜索：已开启（点击关闭）'
+                    : '参与搜索：已关闭（点击开启）',
+                color: site.searchable == 1
+                    ? theme.colorScheme.primary
+                    : theme.disabledColor,
+                onPressed: onToggleSearch,
+              ),
               _RowIconButton(
                 icon: Icons.monitor_heart_outlined,
                 tooltip: '诊断',

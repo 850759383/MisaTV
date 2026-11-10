@@ -1400,7 +1400,10 @@ class _PlayerPageState extends State<PlayerPage>
       _showControls();
       return KeyEventResult.handled;
     }
-    if (key == LogicalKeyboardKey.keyF) {
+    // F / Enter 都切换全屏：Enter 是遥控器与客厅键盘上最顺手的那个键。
+    if (key == LogicalKeyboardKey.keyF ||
+        key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
       _toggleFullscreen();
       return KeyEventResult.handled;
     }
@@ -2449,7 +2452,7 @@ class _PlayerPageState extends State<PlayerPage>
                         ),
                       ),
                       IconButton(
-                        tooltip: '全屏',
+                        tooltip: '全屏（F / Enter）',
                         onPressed: _toggleFullscreen,
                         icon: Icon(
                           _fullscreen
