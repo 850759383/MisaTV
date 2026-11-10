@@ -1562,6 +1562,21 @@ class AppState extends ChangeNotifier {
     return ok;
   }
 
+  /// 只切换「参与搜索」这一个字段：站点列表里直接点一下即可，不动名称 / 地址 /
+  /// ext 等其它内容，也不会把整条站点重写成默认值。
+  Future<bool> setSiteSearchable(String key, bool searchable) {
+    return _editRawSites((rawSites) {
+      final index = _rawSiteIndex(rawSites, key);
+      if (index < 0) return;
+      final old = rawSites[index];
+      final entry = old is Map
+          ? Map<String, dynamic>.from(old)
+          : <String, dynamic>{};
+      entry['searchable'] = searchable ? 1 : 0;
+      rawSites[index] = entry;
+    });
+  }
+
   static void _writeOrRemove(
     Map<String, dynamic> entry,
     String key,

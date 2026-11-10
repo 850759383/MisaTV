@@ -1,0 +1,73 @@
+name: build
+
+on:
+  push:
+    branches: [mod]
+  pull_request:
+    branches: [mod]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: analyze + test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.9
+          cache: true
+
+      - name: 环境信息
+        run: flutter --version
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 静态分析
+        run: flutter analyze
+
+      - name: 单元测试
+        run: flutter test --reporter compact
+
+      - name: 失败时打印诊断
+        if: failure()
+        run: flutter doctor -v
+
+  windows:
+    name: windows release
+    # 固定在 VS 2022 镜像：windows-latest 已是 VS 2026（MSVC 14.51），
+    # flutter_inappwebview_windows 依赖 <experimental/coroutine>，在 VS 2026 下是硬错误。
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.9
+          cache: true
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 构建 Windows Release
+        run: flutter build windows --release
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: MisaTV-windows-x64
+          path: build/windows/x64/runner/Release/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 失败时打印诊断
+        if: failure()
+        run: flutter doctor -v

@@ -733,6 +733,11 @@ class _LivePlayerPageState extends State<LivePlayerPage>
       _showControls();
       return KeyEventResult.handled;
     }
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      unawaited(_toggleFullscreen());
+      return KeyEventResult.handled;
+    }
     if (key == LogicalKeyboardKey.escape) {
       if (_fullscreen) {
         unawaited(_toggleFullscreen());
@@ -1099,7 +1104,7 @@ class _LivePlayerPageState extends State<LivePlayerPage>
                                             ),
                                           ),
                                           IconButton(
-                                            tooltip: '全屏',
+                                            tooltip: '全屏（Enter）',
                                             onPressed: _toggleFullscreen,
                                             icon: Icon(
                                               _fullscreen
