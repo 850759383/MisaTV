@@ -125,6 +125,10 @@ class _PlayerPageState extends State<PlayerPage>
   int _skipOutro = 0;
   String _skipInheritedFrom = '';
   bool _outroFired = false;
+
+  /// 已经写进当前内核的缓冲参数：设置页改动后据此判断要不要重新下发。
+  double? _lastAppliedBufferMin;
+  double? _lastAppliedBufferMax;
   bool _holdingRate = false;
   double? _rateBeforeHold;
   bool _mini = false;
@@ -292,9 +296,22 @@ class _PlayerPageState extends State<PlayerPage>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_opened) return;
+    if (_opened) {
+      // 设置页改了缓冲参数：当前播放器立刻跟随，不必等下一集起播。
+      final settings = _app.playerSettings;
+      if (settings.bufferMinSec != _lastAppliedBufferMin ||
+          settings.bufferMaxSec != _lastAppliedBufferMax) {
+        _lastAppliedBufferMin = settings.bufferMinSec;
+        _lastAppliedBufferMax = settings.bufferMaxSec;
+        final controller = _controller;
+        if (controller != null) _applyBufferRange(controller);
+      }
+      return;
+    }
     _opened = true;
     _app = AppScope.of(context);
+    _lastAppliedBufferMin = _app.playerSettings.bufferMinSec;
+    _lastAppliedBufferMax = _app.playerSettings.bufferMaxSec;
     _immersiveMode = _app.playerSettings.immersiveMode;
     BossKeyService.instance.bindPlayer(
       this,
@@ -581,6 +598,8 @@ class _PlayerPageState extends State<PlayerPage>
       // 4K / HDR 线路经过本机中继时，个别清单会让 fvp 一直没首帧；
       // 25 秒没有初始化完成就放弃，后面会尝试绕过中继直连。
       await controller.initialize().timeout(const Duration(seconds: 25));
+      // 缓冲参数要在起播前设好：fvp 的 bufferRange 只影响后续拉流。
+      _applyBufferRange(controller);
       final live = _detectLive(controller);
       _live = live;
       await controller.setPlaybackSpeed(_rate);
@@ -1718,6 +1737,39 @@ class _PlayerPageState extends State<PlayerPage>
     return ahead.inMilliseconds <= 0 ? null : ahead.inMilliseconds / 1000;
   }
 
+  /// 已缓冲到的位置（毫秒）：取所有 buffered range 里最靠后的 end。
+  double _bufferedEndMs() {
+    final value = _controller?.value;
+    if (value == null || value.buffered.isEmpty) return 0;
+    var end = Duration.zero;
+    for (final range in value.buffered) {
+      if (range.end > end) end = range.end;
+    }
+    return end.inMilliseconds.toDouble();
+  }
+
+  /// 把设置里的「起播预缓冲 / 最大缓冲」写进 fvp（libmdk）内核。
+  ///
+  /// video_player 没有等价参数，非 fvp 内核时直接跳过。换集时调用一次；
+  /// 设置变更由 didChangeDependencies 触发重新下发，当前集立即生效。
+  void _applyBufferRange(VideoPlayerController controller) {
+    if (!_mdkEnabled) return;
+    final settings = _app.playerSettings;
+    final minMs = (settings.bufferMinSec * 1000)
+        .round()
+        .clamp(200, 30000)
+        .toInt();
+    final maxMs = (settings.bufferMaxSec * 1000)
+        .round()
+        .clamp(minMs + 500, 120000)
+        .toInt();
+    try {
+      controller.setBufferRange(min: minMs, max: maxMs);
+    } catch (_) {
+      // 内核未接管时扩展会抛 StateError，退化为内核默认缓冲
+    }
+  }
+
   /// 读 fvp 的 MediaInfo：分辨率、帧率、编码、容器与实时码率（当作网速）。
   ///
   /// fvp 未接管时扩展会抛 StateError，读不到就退化为 VideoPlayerValue。
@@ -2296,29 +2348,55 @@ class _PlayerPageState extends State<PlayerPage>
                             ),
                           );
                         },
-                        child: SliderTheme(
-                          data: SliderTheme.of(context).copyWith(
-                            trackHeight: 3,
-                            thumbShape: const RoundSliderThumbShape(
-                              enabledThumbRadius: 6,
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            // 已缓冲区间：画在轨道下方，位置与 Slider 可见轨道对齐
+                            // （两端各内缩 overlay 半径 12）。
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                child: CustomPaint(
+                                  painter: _BufferedBarPainter(
+                                    played: total <= 0
+                                        ? 0
+                                        : (value / total).clamp(0.0, 1.0),
+                                    buffered: total <= 0
+                                        ? 0
+                                        : (_bufferedEndMs() / total).clamp(
+                                            0.0,
+                                            1.0,
+                                          ),
+                                    inset: 12,
+                                  ),
+                                ),
+                              ),
                             ),
-                            overlayShape: const RoundSliderOverlayShape(
-                              overlayRadius: 12,
+                            SliderTheme(
+                              data: SliderTheme.of(context).copyWith(
+                                trackHeight: 3,
+                                thumbShape: const RoundSliderThumbShape(
+                                  enabledThumbRadius: 6,
+                                ),
+                                overlayShape: const RoundSliderOverlayShape(
+                                  overlayRadius: 12,
+                                ),
+                                activeTrackColor: Colors.white,
+                                inactiveTrackColor: Colors.white24,
+                                thumbColor: Colors.white,
+                              ),
+                              child: Slider(
+                                value: value,
+                                max: total.toDouble(),
+                                onChanged: (v) => setState(
+                                  () => _position = Duration(
+                                    milliseconds: v.round(),
+                                  ),
+                                ),
+                                onChangeEnd: (v) =>
+                                    _seekTo(Duration(milliseconds: v.round())),
+                              ),
                             ),
-                            activeTrackColor: Colors.white,
-                            inactiveTrackColor: Colors.white24,
-                            thumbColor: Colors.white,
-                          ),
-                          child: Slider(
-                            value: value,
-                            max: total.toDouble(),
-                            onChanged: (v) => setState(
-                              () =>
-                                  _position = Duration(milliseconds: v.round()),
-                            ),
-                            onChangeEnd: (v) =>
-                                _seekTo(Duration(milliseconds: v.round())),
-                          ),
+                          ],
                         ),
                       ),
                     ),
@@ -3822,4 +3900,45 @@ class _MediaStats {
   final String audioCodec;
   final int audioChannels;
   final String format;
+}
+
+/// 进度条上的「已缓冲」条：从播放位置画到缓冲区末尾。
+///
+/// 与 Slider 的可见轨道对齐：轨道两端各内缩 overlay 半径（这里 12），
+/// 否则缓冲条会比轨道宽出一截，看起来像错位。
+class _BufferedBarPainter extends CustomPainter {
+  const _BufferedBarPainter({
+    required this.played,
+    required this.buffered,
+    required this.inset,
+  });
+
+  /// 已播放比例（0–1）。
+  final double played;
+
+  /// 已缓冲比例（0–1）。
+  final double buffered;
+
+  /// 轨道两端的缩进（= SliderTheme.overlayShape 的半径）。
+  final double inset;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final track = size.width - inset * 2;
+    if (track <= 0 || buffered <= played) return;
+    final left = inset + track * played;
+    final right = inset + track * buffered;
+    final centerY = size.height / 2;
+    final rect = Rect.fromLTRB(left, centerY - 1.5, right, centerY + 1.5);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, const Radius.circular(2)),
+      Paint()..color = Colors.white.withValues(alpha: 0.45),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _BufferedBarPainter oldDelegate) =>
+      oldDelegate.played != played ||
+      oldDelegate.buffered != buffered ||
+      oldDelegate.inset != inset;
 }
