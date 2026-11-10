@@ -132,6 +132,12 @@ class _PlayerPageState extends State<PlayerPage>
   /// 运行时识别出的直播流：隐藏进度条 / 弹幕 / 片头片尾，底部显示「直播」。
   bool _live = false;
 
+  /// 进度条右键单击 / 双击判定：双击清除记录，单击取点。
+  /// 单击要等过双击窗口才执行，否则第二次按下时第一次的设置已经落盘，撤不回来。
+  Timer? _skipTapTimer;
+  DateTime? _lastSecondaryTapAt;
+  double _lastSecondaryTapDx = 0;
+
   /// 沉浸观影下窗口本来就全屏，离开播放器时不能把外层沉浸全屏退掉。
   bool _immersiveMode = false;
 
@@ -1331,6 +1337,7 @@ class _PlayerPageState extends State<PlayerPage>
     _hideTimer?.cancel();
     _saveTimer?.cancel();
     _detailsTimer?.cancel();
+    _cancelPendingSkipPick();
     final autoSearchDone = _autoSearchDone;
     if (autoSearchDone != null && !autoSearchDone.isCompleted) {
       autoSearchDone.complete();
@@ -2281,20 +2288,21 @@ class _PlayerPageState extends State<PlayerPage>
                     style: const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
                   Expanded(
-                    // 进度条右键一次点选即生效：开头 5 分钟内取片头、结尾 5 分钟内取片尾。
+                    // 进度条右键一次点选即生效：开头 5 分钟内取片头、结尾 5 分钟内取片尾；
+                    // 右键双击则清除本资源的记录。
                     child: LayoutBuilder(
                       builder: (_, constraints) => Listener(
                         onPointerDown: (event) {
                           if (event.kind != PointerDeviceKind.mouse) return;
-                          if ((event.buttons & kSecondaryMouseButton) == 0) {
+                          if ((event.buttons & kSecondaryMouseButton) != 0) {
+                            _onProgressSecondaryDown(
+                              width: constraints.maxWidth,
+                              dx: event.localPosition.dx,
+                            );
                             return;
                           }
-                          unawaited(
-                            _pickSkipFromProgress(
-                              width: constraints.maxWidth,
-                              localDx: event.localPosition.dx,
-                            ),
-                          );
+                          // 左键按下（拖动 / 跳转）就放弃还没执行的右键取点。
+                          _cancelPendingSkipPick();
                         },
                         child: SliderTheme(
                           data: SliderTheme.of(context).copyWith(
@@ -3339,6 +3347,56 @@ class _PlayerPageState extends State<PlayerPage>
     }
   }
 
+  /// 进度条右键入口：单击取点，双击清除。
+  ///
+  /// 双击只能靠延迟确认：第一次右键按下先挂起一次取点，过了双击窗口还没等到
+  /// 第二次按下才真正执行；窗口内再次按下（位置偏差在 slop 内）就取消挂起、
+  /// 改为清除本资源的记录。这样不会出现「双击的第一下已经写进记录」的脏状态。
+  void _onProgressSecondaryDown({required double width, required double dx}) {
+    final now = DateTime.now();
+    final last = _lastSecondaryTapAt;
+    final isDoubleTap =
+        last != null &&
+        isSkipDoubleTap(
+          gap: now.difference(last),
+          dx: dx,
+          lastDx: _lastSecondaryTapDx,
+        );
+    _skipTapTimer?.cancel();
+    _skipTapTimer = null;
+    if (isDoubleTap) {
+      _lastSecondaryTapAt = null;
+      unawaited(_clearSkipSegments());
+      return;
+    }
+    _lastSecondaryTapAt = now;
+    _lastSecondaryTapDx = dx;
+    _skipTapTimer = Timer(skipDoubleTapWindow, () {
+      _skipTapTimer = null;
+      _lastSecondaryTapAt = null;
+      unawaited(_pickSkipFromProgress(width: width, localDx: dx));
+    });
+  }
+
+  /// 取消还没执行的右键取点（开始拖进度条或离开页面时）。
+  void _cancelPendingSkipPick() {
+    _skipTapTimer?.cancel();
+    _skipTapTimer = null;
+    _lastSecondaryTapAt = null;
+  }
+
+  /// 右键双击进度条：清掉本资源的片头 / 片尾记录，与弹窗里的「清除本资源」一致。
+  Future<void> _clearSkipSegments() async {
+    if (_live) return;
+    if (_skipIntro <= 0 && _skipOutro <= 0) {
+      _toast('当前没有片头 / 片尾记录');
+      return;
+    }
+    await _saveSkipSegments(0, 0);
+    if (!mounted) return;
+    _toast('已清除本资源的片头 / 片尾记录');
+  }
+
   /// 进度条右键：直接按点击位置选取片头 / 片尾，不再弹二次菜单。
   ///
   /// 用区间来区分两种设置，避免互相踩：开头 5 分钟内 = 片头，结尾 5 分钟内 =
@@ -3502,7 +3560,8 @@ class _PlayerPageState extends State<PlayerPage>
                       Text(
                         '保存后对本资源所有剧集生效；片头 = 起播直接跳到该秒数，'
                         '片尾 = 距结尾还剩这么多秒时自动跳下一集。\n'
-                        '进度条上右键可直接取点：开头 5 分钟算片头，结尾 5 分钟算片尾。',
+                        '进度条上右键可直接取点：开头 5 分钟算片头，结尾 5 分钟算片尾；'
+                        '右键双击进度条可清除记录。',
                         style: Theme.of(ctx).textTheme.bodySmall
                             ?.copyWith(height: 1.5),
                       ),
