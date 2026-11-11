@@ -173,3 +173,23 @@ bool shouldSkipOutro(int positionMs, int durationMs, int outroSec, bool fired) {
   if (point <= 1000 || point >= durationMs) return false;
   return positionMs >= point;
 }
+
+/// 进度条右键双击的判定窗口（对齐 Flutter 的 `kDoubleTapTimeout`）。
+const Duration skipDoubleTapWindow = Duration(milliseconds: 300);
+
+/// 双击两次按下之间允许的位置偏差（逻辑像素），手抖一点仍算同一次双击。
+const double skipDoubleTapSlop = 24;
+
+/// 进度条右键的两次按下是否构成「双击」。
+///
+/// [gap] 为两次按下的时间间隔，[dx] / [lastDx] 为各自在进度条上的横坐标。
+/// 间隔超窗或位置差超容差都按两次独立单击处理 —— 否则用户想连续设片头、
+/// 片尾时，第二次点击会被误判成清除。
+bool isSkipDoubleTap({
+  required Duration gap,
+  required double dx,
+  required double lastDx,
+}) {
+  if (gap.isNegative || gap > skipDoubleTapWindow) return false;
+  return (dx - lastDx).abs() <= skipDoubleTapSlop;
+}
