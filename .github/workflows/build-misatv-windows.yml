@@ -1,0 +1,120 @@
+name: Package MisaTV for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: source
+    steps:
+      - name: Check out upstream source
+        uses: actions/checkout@v4
+        with:
+          repository: yagami-hue/MisaTV
+          ref: 484576621b96143a38ffd2b3722ca3b76725567e
+          path: source
+          persist-credentials: false
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.9
+          channel: stable
+          cache: true
+
+      - name: Resolve locked dependencies
+        run: |
+          flutter --version
+          flutter pub get --enforce-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency resolution failed' }
+
+      - name: Run tests
+        run: |
+          flutter test --reporter compact
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+
+      - name: Build Windows x64 release
+        run: |
+          flutter build windows --release
+          if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
+
+      - name: Prepare portable package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = Join-Path $PWD 'build/windows/x64/runner/Release'
+          foreach ($file in @('MisaTV.exe', 'flutter_windows.dll', 'data/icudtl.dat', 'data/app.so')) {
+            if (-not (Test-Path (Join-Path $release $file))) { throw "Missing runtime file: $file" }
+          }
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          $package = Join-Path $dist 'MisaTV-windows-x64'
+          New-Item -ItemType Directory -Force $package | Out-Null
+          Copy-Item "$release/*" $package -Recurse -Force
+
+          # App-local Microsoft runtime allows normal users to run the portable build.
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'VS 2022 C++ runtime location was not found' }
+          $crt = Get-ChildItem "$vs/VC/Redist/MSVC" -Directory |
+            Sort-Object Name -Descending | ForEach-Object {
+              $candidate = Join-Path $_.FullName 'x64/Microsoft.VC143.CRT'
+              if (Test-Path $candidate) { Get-Item $candidate }
+            } | Select-Object -First 1
+          if (-not $crt) { throw 'Redistributable C++ runtime was not found' }
+          Copy-Item "$($crt.FullName)/*.dll" $package -Force
+          Copy-Item LICENSE,THIRD-PARTY-NOTICES.md,README.md $package
+          @'
+          MisaTV 0.9.0 - Windows x64 portable build
+
+          Extract the entire ZIP and run MisaTV.exe. Keep the DLLs and data folder together.
+          Supported OS: Windows 10 or later (x64).
+          Source: https://github.com/yagami-hue/MisaTV
+          Commit: 484576621b96143a38ffd2b3722ca3b76725567e
+          Flutter: 3.47.9; Dart: 3.13.7; VS: 2022.
+
+          Import your own sources in Settings after accepting the first-run statement.
+          Settings and history are saved under userdata beside the executable, or AppData
+          when the executable directory is not writable.
+
+          WebView2 Runtime is required for embedded web login. Install Microsoft's official
+          WebView2 Evergreen Runtime if it is missing on your computer.
+
+          Upstream excludes aria2c.exe. Magnet/BT playback requires a separately installed
+          aria2 engine on PATH. Other functionality can be used without it.
+          Python/JRE and some spider runtimes download on demand and require Internet access.
+          This package contains no preconfigured video sources or accounts.
+
+          See LICENSE and THIRD-PARTY-NOTICES.md for license information.
+          The matching upstream source archive is included alongside the portable ZIP.
+          '@ | Set-Content (Join-Path $package 'START-HERE.txt') -Encoding utf8
+
+          $sourceZip = Join-Path $dist 'MisaTV-source-4845766.zip'
+          git archive --format=zip --output=$sourceZip HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Source archive failed' }
+          $zip = Join-Path $dist 'MisaTV-0.9.0-windows-x64.zip'
+          Compress-Archive -Path $package -DestinationPath $zip -CompressionLevel Optimal
+          Get-ChildItem $dist -Filter '*.zip' | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content (Join-Path $dist 'SHA256SUMS.txt') -Encoding ascii
+
+      - name: Upload downloadable packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: MisaTV-0.9.0-windows-x64
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: flutter doctor -v
