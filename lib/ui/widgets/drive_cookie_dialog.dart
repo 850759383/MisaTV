@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import '../../app.dart';
 import '../../core/logging/app_log.dart';
 import '../../services/drive/baidu_session.dart';
+import '../../services/drive/bili_session.dart';
 import '../../services/drive/drive_cookie_input.dart';
 import '../../services/drive/drive_login_types.dart';
+import '../../services/drive/pan115_session.dart';
 import '../../services/drive/quark_session.dart';
 import '../../services/drive/uc_session.dart';
 
@@ -38,6 +40,9 @@ class _DriveCookieDialogState extends State<_DriveCookieDialog> {
   String get _authFields =>
       (driveAuthCookieNames[_provider] ?? const []).join(' / ');
 
+  /// 这个 Cookie 是不是「可选增强」（哔哩）：没登录也能播低画质。
+  bool get _optional => _provider == 'bili';
+
   @override
   void dispose() {
     _controller.dispose();
@@ -51,7 +56,7 @@ class _DriveCookieDialogState extends State<_DriveCookieDialog> {
       setState(() => _error = '请粘贴 Cookie，格式形如 a=b; c=d');
       return;
     }
-    if (!driveCookieHasAuth(_provider, cookie)) {
+    if (!driveCookieIsComplete(_provider, cookie)) {
       setState(() => _error = driveCookieMissingHint(_provider));
       return;
     }
@@ -63,15 +68,22 @@ class _DriveCookieDialogState extends State<_DriveCookieDialog> {
       final result = switch (_provider) {
         'quark' => await refreshQuarkSession(cookie),
         'uc' => await refreshUcSession(cookie),
+        'baidu' => await refreshBaiduSession(cookie),
+        '115' => await refreshPan115Session(cookie),
+        'bili' => await refreshBiliSession(cookie),
         _ => await refreshBaiduSession(cookie),
       };
       if (!mounted) return;
       if (result.valid == false) {
-        setState(() {
-          _saving = false;
-          _error = 'Cookie 未通过登录校验（可能是访客态或已过期），请重新复制';
-        });
-        return;
+        // 哔哩的 Cookie 只是画质增强：登录态过期也值得保存，让用户自己决定。
+        if (_provider != 'bili') {
+          setState(() {
+            _saving = false;
+            _error = 'Cookie 未通过登录校验（可能是访客态或已过期），请重新复制';
+          });
+          return;
+        }
+        AppLog.w('drive', '哔哩 Cookie 未通过登录校验，按用户输入原样保存');
       }
       if (result.valid == null) {
         AppLog.w('drive', '手动 Cookie 无法联网校验 provider=$_provider，按原样保存');
@@ -116,7 +128,11 @@ class _DriveCookieDialogState extends State<_DriveCookieDialog> {
               ),
               const SizedBox(height: 8),
               Text(
-                _authFields.isEmpty
+                _optional
+                    ? '建议包含登录态字段：$_authFields（没有也能播 360P / 480P，'
+                        '配上后才能拿高清与大会员画质）；'
+                        'Cookie 等同于账号密码，只会保存在本机。'
+                    : _authFields.isEmpty
                     ? 'Cookie 等同于账号密码，只会保存在本机。'
                     : '必须包含登录态字段：$_authFields；'
                         'Cookie 等同于账号密码，只会保存在本机。',
@@ -134,7 +150,11 @@ class _DriveCookieDialogState extends State<_DriveCookieDialog> {
                   height: 1.5,
                 ),
                 decoration: InputDecoration(
-                  hintText: '例如：__puus=xxxx; __pus=yyyy; ...',
+                  hintText: _provider == '115'
+                      ? '例如：UID=xxxx; CID=yyyy; SEID=zzzz; ...'
+                      : _provider == 'bili'
+                      ? '例如：SESSDATA=xxxx; bili_jct=yyyy; ...'
+                      : '例如：__puus=xxxx; __pus=yyyy; ...',
                   border: const OutlineInputBorder(),
                   isDense: true,
                   errorText: _error.isEmpty ? null : _error,
@@ -152,7 +172,9 @@ class _DriveCookieDialogState extends State<_DriveCookieDialog> {
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      '保存前会联网校验登录态；校验通过后 Cookie 会同步给订阅里的蜘蛛源。',
+                      _optional
+                          ? '保存前会联网校验登录态；校验失败仍会保存（画质增强不阻断播放）。'
+                          : '保存前会联网校验登录态；校验通过后 Cookie 会同步给订阅里的蜘蛛源。',
                       style: theme.textTheme.labelSmall?.copyWith(
                         color: theme.colorScheme.onSurface.withValues(
                           alpha: 0.50,

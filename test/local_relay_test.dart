@@ -2,8 +2,10 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kniephos/core/net/app_http.dart';
 import 'package:kniephos/models/dav.dart';
 import 'package:kniephos/services/discover/cover_images.dart';
+import 'package:kniephos/services/relay/proxy_rules.dart';
 import 'package:kniephos/services/relay/local_relay.dart';
 import 'package:kniephos/services/torrent/bt_stream.dart';
 
@@ -113,6 +115,19 @@ void main() {
         await res.close();
         return;
       }
+      if (req.uri.path == '/bili-cdn.mp4') {
+        // 哔哩 CDN 的防盗链：没有 bilibili.com 的 Referer 就 403。
+        final referer =
+            req.headers.value(HttpHeaders.refererHeader) ?? '';
+        if (!referer.contains('bilibili.com')) {
+          res.statusCode = 403;
+          await res.close();
+          return;
+        }
+        res.write('ref:$referer');
+        await res.close();
+        return;
+      }
       if (req.uri.path == '/headers') {
         res.write(
           'cookie:${req.headers.value(HttpHeaders.cookieHeader) ?? ''}\n',
@@ -144,6 +159,10 @@ void main() {
       davAuth: (id) => id == 'srv-1' ? 'Basic dGVzdDp0ZXN0' : '',
       btSource: () => bt,
       jvmProxyPort: () => jvmProxy.port,
+      externalEpisodeResolver: (token, index) async {
+        if (token != 'demo') return null;
+        return 'http://127.0.0.1:${upstream.port}/ua-only';
+      },
     );
   });
 
@@ -157,10 +176,12 @@ void main() {
   Future<({int status, List<int> bytes, HttpHeaders headers})> fetch(
     String url, {
     Map<String, String> headers = const {},
+    bool followRedirects = true,
   }) async {
     final client = HttpClient();
     try {
-      final req = await client.getUrl(Uri.parse(url));
+      final req = await client.getUrl(Uri.parse(url))
+        ..followRedirects = followRedirects;
       headers.forEach(req.headers.set);
       final res = await req.close();
       final bytes = <int>[];
@@ -191,6 +212,14 @@ void main() {
     final target = 'http://127.0.0.1:${upstream.port}/ua-only';
     final body = await get(relay.playUrl(target));
     expect(body, startsWith('ua:Mozilla/5.0'));
+  });
+
+  test('/play 哔哩 CDN 未配 Cookie 也补 Referer（否则 403 播不了低画质）', () async {
+    // 未登录时只有 360P / 480P，但 CDN 照样按 Referer 防盗链；
+    // 中继不能因为「没配 Cookie」就跳过这段补头。
+    final target = 'http://127.0.0.1:${upstream.port}/bili-cdn.mp4';
+    final body = await get(relay.playUrl(target, provider: 'bili'));
+    expect(body, contains('ref:https://www.bilibili.com/'));
   });
 
   test('m3u8：去广告 + 分片/密钥递归改写回中继', () async {
@@ -284,6 +313,23 @@ void main() {
     expect(await get(anonymous), 'auth:null');
   });
 
+  test('/ext 选集按需解析后 302 到播放地址', () async {
+    final result = await fetch(
+      '${relay.baseUrl}/ext/demo/1',
+      followRedirects: false,
+    );
+    expect(result.status, HttpStatus.found);
+    expect(
+      result.headers.value(HttpHeaders.locationHeader),
+      'http://127.0.0.1:${upstream.port}/ua-only',
+    );
+    final unknown = await fetch(
+      '${relay.baseUrl}/ext/unknown/1',
+      followRedirects: false,
+    );
+    expect(unknown.status, HttpStatus.badGateway);
+  });
+
   test('/bt 按 Range 取流并做首片门控', () async {
     final result = await fetch(
       '${relay.baseUrl}/bt/$hash/1',
@@ -313,5 +359,32 @@ void main() {
     );
     expect(blocked.status, 503);
     bt.ready = true;
+  });
+
+  test('代理规则：命中的地址改走中继通用代理口，未命中的保持直连', () async {
+    final port = upstream.port;
+    ProxyRules.current = ProxyRules.fromRules([
+      {
+        'name': 'proxy',
+        'hosts': ['live.txt'],
+      },
+    ]);
+    ProxyRules.relayBase = () => relay.baseUrl;
+    addTearDown(() {
+      ProxyRules.current = ProxyRules.none;
+      ProxyRules.relayBase = () => '';
+    });
+    final http = AppHttp();
+    addTearDown(http.close);
+
+    // 命中：地址被改写成中继的 /proxy?do=proxy，正文由中继取回。
+    final routed = await http.getText('http://127.0.0.1:$port/live.txt');
+    expect(routed.url, contains('/proxy?do=proxy&url='));
+    expect(routed.body, contains('CCTV1'));
+
+    // 未命中：仍然直连，地址不变。
+    final direct = await http.getText('http://127.0.0.1:$port/ua-only');
+    expect(direct.url, 'http://127.0.0.1:$port/ua-only');
+    expect(direct.body, startsWith('ua:'));
   });
 }

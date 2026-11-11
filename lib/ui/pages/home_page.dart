@@ -948,17 +948,13 @@ class _HeaderState extends State<_Header> {
   bool _quotesRequested = false;
 
   @override
-  void initState() {
-    super.initState();
-    _quoteTimer = Timer.periodic(_quoteInterval, (_) => _nextQuote());
-  }
-
-  @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_quotesRequested) return;
-    _quotesRequested = true;
     final app = AppScope.of(context);
+    // 关闭台词轮换时停掉定时器，不再产生不必要的定时刷新。
+    _syncQuoteTimer(app.showMovieQuotes);
+    if (!app.showMovieQuotes || _quotesRequested) return;
+    _quotesRequested = true;
     // 先用上次缓存顶上，再异步刷新在线台词库。
     final cached = app.quoteService.cachedPool;
     if (cached.isNotEmpty) {
@@ -966,6 +962,15 @@ class _HeaderState extends State<_Header> {
       _quoteIndex = _random.nextInt(_quotes.length);
     }
     unawaited(_loadOnlineQuotes(app));
+  }
+
+  void _syncQuoteTimer(bool enabled) {
+    if (!enabled) {
+      _quoteTimer?.cancel();
+      _quoteTimer = null;
+      return;
+    }
+    _quoteTimer ??= Timer.periodic(_quoteInterval, (_) => _nextQuote());
   }
 
   Future<void> _loadOnlineQuotes(AppState app) async {
@@ -999,141 +1004,175 @@ class _HeaderState extends State<_Header> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(14),
-              child: Image.asset(
-                'assets/images/app_icon.png',
-                width: 40,
-                height: 40,
-                fit: BoxFit.cover,
-                filterQuality: FilterQuality.medium,
+        // 关掉台词轮换后整条头部收起：LOGO 与档案名都不显示，
+        // 导入按钮下移到「N 个可用站点」那一行，和站点数量齐平。
+        if (app.showMovieQuotes) ...[
+          Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: Image.asset(
+                  'assets/images/app_icon.png',
+                  width: 40,
+                  height: 40,
+                  fit: BoxFit.cover,
+                  filterQuality: FilterQuality.medium,
+                ),
               ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Tooltip(
-                    message: '点击搜索《${quote.title}》',
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(8),
-                      onTap: () => app.requestSearch(quote.searchKeyword),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 1),
-                        child: AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 350),
-                          switchInCurve: Curves.easeOut,
-                          switchOutCurve: Curves.easeIn,
-                          layoutBuilder: (currentChild, previousChildren) =>
-                              Stack(
-                                alignment: Alignment.centerLeft,
-                                children: [...previousChildren, ?currentChild],
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Tooltip(
+                      message: '点击搜索《${quote.title}》',
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () => app.requestSearch(quote.searchKeyword),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 1),
+                          child: AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 350),
+                            switchInCurve: Curves.easeOut,
+                            switchOutCurve: Curves.easeIn,
+                            layoutBuilder: (currentChild, previousChildren) =>
+                                Stack(
+                                  alignment: Alignment.centerLeft,
+                                  children: [
+                                    ...previousChildren,
+                                    ?currentChild,
+                                  ],
+                                ),
+                            child: Text(
+                              quote.display,
+                              key: ValueKey(_quoteIndex),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.headlineSmall?.copyWith(
+                                fontSize: 20,
+                                height: 1.3,
                               ),
-                          child: Text(
-                            quote.display,
-                            key: ValueKey(_quoteIndex),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.headlineSmall?.copyWith(
-                              fontSize: 20,
-                              height: 1.3,
                             ),
                           ),
                         ),
                       ),
                     ),
+                    Text(
+                      app.activeProfile?.name ?? '本地优先 · 无账号 · 无遥测',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(
+                          alpha: 0.70,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: '导入配置',
+                onPressed: widget.onImport,
+                icon: const Icon(Icons.add_circle_outline_rounded),
+              ),
+            ],
+          ),
+        ],
+        const SizedBox(height: 14),
+        Row(
+          children: [
+            // 左侧整组（站点 / 过滤提示 / 站点数）吃掉剩余宽度，
+            // 导入按钮才能真的贴到行尾、和下面那行的筛选按钮同列。
+            Expanded(
+              child: Row(
+                children: [
+                  Flexible(
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(999),
+                      onTap: widget.onPickSource,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.primary.withValues(
+                            alpha: 0.14,
+                          ),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.dns_rounded,
+                              size: 16,
+                              color: theme.colorScheme.primary,
+                            ),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Text(
+                                site?.displayName ?? '未选择站点',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 12,
+                                  color: theme.colorScheme.primary,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Icon(
+                              Icons.unfold_more_rounded,
+                              size: 14,
+                              color: theme.colorScheme.primary,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   ),
+                  const SizedBox(width: 10),
+                  if (widget.hidden > 0) ...[
+                    Icon(
+                      Icons.shield_outlined,
+                      size: 14,
+                      color: theme.colorScheme.primary.withValues(alpha: 0.7),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '已过滤 ${widget.hidden} 条',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.primary.withValues(alpha: 0.7),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                  ],
                   Text(
-                    app.activeProfile?.name ?? '本地优先 · 无账号 · 无遥测',
-                    style: theme.textTheme.bodySmall?.copyWith(
+                    '${app.usableSites.length} 个可用站点',
+                    style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.onSurface.withValues(
-                        alpha: 0.70,
+                        alpha: 0.65,
                       ),
                     ),
                   ),
                 ],
               ),
             ),
-            IconButton(
-              tooltip: '导入配置',
-              onPressed: widget.onImport,
-              icon: const Icon(Icons.add_circle_outline_rounded),
-            ),
-          ],
-        ),
-        const SizedBox(height: 14),
-        Row(
-          children: [
-            Flexible(
-              child: InkWell(
-                borderRadius: BorderRadius.circular(999),
-                onTap: widget.onPickSource,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.primary.withValues(alpha: 0.14),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.dns_rounded,
-                        size: 16,
-                        color: theme.colorScheme.primary,
-                      ),
-                      const SizedBox(width: 6),
-                      Flexible(
-                        child: Text(
-                          site?.displayName ?? '未选择站点',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            fontSize: 12,
-                            color: theme.colorScheme.primary,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      Icon(
-                        Icons.unfold_more_rounded,
-                        size: 14,
-                        color: theme.colorScheme.primary,
-                      ),
-                    ],
-                  ),
+            // 台词轮换关掉后导入按钮留在这条站点行，靠右和下面的筛选按钮同列。
+            if (!app.showMovieQuotes) ...[
+              const SizedBox(width: 8),
+              IconButton(
+                tooltip: '导入配置',
+                onPressed: widget.onImport,
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints.tightFor(
+                  width: 36,
+                  height: 36,
                 ),
+                padding: EdgeInsets.zero,
+                icon: const Icon(Icons.add_circle_outline_rounded, size: 20),
               ),
-            ),
-            const SizedBox(width: 10),
-            if (widget.hidden > 0) ...[
-              Icon(
-                Icons.shield_outlined,
-                size: 14,
-                color: theme.colorScheme.primary.withValues(alpha: 0.7),
-              ),
-              const SizedBox(width: 4),
-              Text(
-                '已过滤 ${widget.hidden} 条',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.primary.withValues(alpha: 0.7),
-                ),
-              ),
-              const SizedBox(width: 10),
             ],
-            Text(
-              '${app.usableSites.length} 个可用站点',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurface.withValues(alpha: 0.65),
-              ),
-            ),
           ],
         ),
       ],

@@ -49,6 +49,10 @@ class LocalRelay {
   /// 边播边缓存的磁盘实现；未启用 / 未配置目录时为 null。
   StreamDiskCache? _streamCache;
 
+  /// 外部播放器选集列表的按需解析：`/ext/<token>/<index>` 调到这里，
+  /// 返回可直接播放的地址（通常是本机 `/play` 中继地址）。
+  Future<String?> Function(String token, int index)? _externalEpisodeResolver;
+
   /// `/play` 的请求头不写进 URL，而是换成短 token（`hk=h1`）。
   ///
   /// 网盘直链 + Cookie + UA + Referer 一起塞进 query 时，URL 很容易超过
@@ -85,6 +89,7 @@ class LocalRelay {
     String Function()? cacheDir,
     bool Function()? cacheEnabled,
     int Function()? cacheLimitMb,
+    Future<String?> Function(String token, int index)? externalEpisodeResolver,
   }) async {
     if (_server != null) return;
     _fileRoot = fileRoot;
@@ -102,6 +107,7 @@ class LocalRelay {
             enabled: cacheEnabled ?? () => false,
             limitMb: cacheLimitMb ?? () => 1024,
           );
+    _externalEpisodeResolver = externalEpisodeResolver;
     _client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15)
       ..autoUncompress = false;
@@ -242,6 +248,9 @@ class LocalRelay {
         return await _handlePkg(request);
       }
       if (path == '/img') return await _handleImg(request);
+      if (path.startsWith('/ext/')) {
+        return await _handleExternalEpisode(request);
+      }
       if (path.startsWith('/bt/')) return await _handleBt(request);
       if (path == '/proxy') return await _handleLiveProxy(request);
       if (path.startsWith('/proxy/')) {
@@ -298,6 +307,25 @@ class LocalRelay {
       headers[HttpHeaders.userAgentHeader] =
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
           'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+    }
+    // ★ 哔哩 CDN 按 Referer 防盗链：不带 bilibili.com 的 Referer 会回 403，
+    //   播放器只报 invalid or unsupported media。未登录（只有 360P / 480P）时
+    //   这条同样必需，不能因为「没配 Cookie」就跳过。
+    final biliLink =
+        provider == 'bili' ||
+        targetHost.endsWith('bilibili.com') ||
+        targetHost.endsWith('bilivideo.com') ||
+        targetHost.endsWith('bilivideo.cn') ||
+        targetHost.endsWith('hdslb.com');
+    if (biliLink) {
+      if (_headerValue(headers, HttpHeaders.refererHeader).isEmpty) {
+        headers[HttpHeaders.refererHeader] = 'https://www.bilibili.com/';
+      }
+      if (_headerValue(headers, HttpHeaders.userAgentHeader).isEmpty) {
+        headers[HttpHeaders.userAgentHeader] =
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+      }
     }
     final davId = (query['dav'] ?? '').trim();
     if (davId.isNotEmpty &&
@@ -516,6 +544,32 @@ class LocalRelay {
     await file.openRead().pipe(res);
   }
 
+  /// 外部播放器选集：按需解析后 302 到真正的播放地址。
+  ///
+  /// 播放器在片单里切集时才会请求这里，所以不用在启动外部播放器之前
+  /// 把整季直链全部解析一遍。
+  Future<void> _handleExternalEpisode(HttpRequest request) async {
+    final res = request.response;
+    final segments = request.uri.pathSegments;
+    final resolver = _externalEpisodeResolver;
+    if (resolver == null || segments.length < 3) {
+      return _text(res, 404, 'external playlist unavailable');
+    }
+    final token = segments[1];
+    final index = int.tryParse(segments[2]);
+    if (index == null || index < 0) {
+      return _text(res, 400, 'bad episode index');
+    }
+    final target = await resolver(token, index);
+    if (target == null || target.isEmpty) {
+      return _text(res, 502, '无法解析这一集');
+    }
+    AppLog.i('relay', '/ext/$index -> ${redactUrl(target)}');
+    res.statusCode = HttpStatus.found;
+    res.headers.set(HttpHeaders.locationHeader, target);
+    await res.close();
+  }
+
   /// BT 取流口：`/bt/<infoHash>/<fileIndex>`。
   ///
   /// 与 `/play` 的差别是数据来自本机正在下载的文件：
@@ -632,11 +686,23 @@ class LocalRelay {
       if ((query['ref'] ?? '').trim().isNotEmpty)
         'Referer': query['ref']!.trim(),
     };
-    final upstream = await _open(
-      target,
-      headers: headers,
-      method: request.method,
-    );
+    // 代理链路抖动时（隧道被对端掐断、节点瞬断）重试一次再放弃：
+    // 封面是并发拉取的，偶发失败在界面上就是「有个别封面不出来」。
+    HttpClientResponse upstream;
+    try {
+      upstream = await _open(
+        target,
+        headers: headers,
+        method: request.method,
+      );
+    } catch (_) {
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      upstream = await _open(
+        target,
+        headers: headers,
+        method: request.method,
+      );
+    }
     res.statusCode = upstream.statusCode;
     _copyHeader(upstream, res, HttpHeaders.contentTypeHeader);
     _copyHeader(upstream, res, HttpHeaders.contentLengthHeader);

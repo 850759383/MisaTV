@@ -71,6 +71,18 @@ bool isAowuShellClass(String className) {
   return simple.endsWith('amns') || simple.contains('aowu');
 }
 
+/// 线路名 / 失败文案是否指向哔哩哔哩（`B站` / `哔哩` / `bilibili`）。
+///
+/// 单独抽成顶层函数：`_driveProviderFromFlag` 里 UC 用的是 `contains('uc')`，
+/// 而 `bilibili` 不含 `uc`，B 站线路会一路落到 null，导致「Cookie 过期后刷新
+/// 会话再重试」永远触发不到。抽出来也便于单测覆盖。
+bool looksLikeBiliFlag(String flag) {
+  if (flag.contains('哔哩') || RegExp(r'[Bb]\s*站').hasMatch(flag)) return true;
+  final lower = flag.toLowerCase();
+  return lower.contains('bilibili') ||
+      RegExp(r'(^|[^a-z])bili([^a-z]|$)').hasMatch(lower);
+}
+
 /// 随包「真实实现」与订阅壳版本不匹配时的典型错误。
 ///
 /// 这些错误继续跑只会得到空内容 / 难懂 NPE；命中后应改用解包 payload。
@@ -496,10 +508,14 @@ class JarSpiderService {
     return result;
   }
 
-  /// `127.0.0.1:<JVM 端口>/proxy?do=pan…` → 本地中继的同路由地址。
+  /// `127.0.0.1:<JVM 端口>/proxy?do=…` → 本地中继的同路由地址。
   ///
   /// 桌面端没有原 App 的宿主取流进程，但中继已经实现了 `do=pan/do=proxy`，
   /// 只要把端口换成中继端口即可继续播放。
+  ///
+  /// 中继不认识的宿主路由（`do=bili` / `do=biliys` / `do=ali` / `do=czspp` …）
+  /// 不能在这里放行：中继只会回 400，播放器拿到 400 仍然是「打不开」。
+  /// 这类地址只有**产出它的那个 JVM**能解，必须走常驻 host 的 `_jvmProxyPort`。
   String? _relayHostProxyUrl(String url) {
     final uri = Uri.tryParse(url);
     if (uri == null || uri.path != '/proxy') return null;
@@ -695,8 +711,12 @@ class JarSpiderService {
     if (flag.contains('夸克') || lower.contains('quark')) return 'quark';
     if (flag.contains('UC') || lower.contains('uc')) return 'uc';
     if (flag.contains('百度') || lower.contains('baidu')) return 'baidu';
+    if (_looksLikeBiliFlag(flag)) return 'bili';
+    if (RegExp(r'(^|[^0-9])115([^0-9]|$)').hasMatch(flag)) return '115';
     return null;
   }
+
+  static bool _looksLikeBiliFlag(String flag) => looksLikeBiliFlag(flag);
 
   bool _isDeadLocalPlayUrl(String url) {
     final lower = url.toLowerCase();
@@ -960,13 +980,17 @@ class JarSpiderService {
         lower.contains('cookie') ||
         lower.contains('(auth)');
     if (!authLike) return null;
-    return _driveProviderFromMessage(message);
+    // 蜘蛛的报错往往不带网盘名（如「获取失败：账号未登录或 Cookie 已失效」），
+    // 这时按线路名兜底，否则哔哩 / 115 的「刷新会话后重试」永远触发不到。
+    return _driveProviderFromMessage(message) ?? _driveProviderFromFlag(flag);
   }
 
   String? _driveProviderFromMessage(String message) {
     final lower = message.toLowerCase();
     if (message.contains('夸克') || lower.contains('quark')) return 'quark';
     if (message.contains('百度') || lower.contains('baidu')) return 'baidu';
+    if (message.contains('115')) return '115';
+    if (_looksLikeBiliFlag(message)) return 'bili';
     if (message.contains('UC') ||
         lower.contains('ucpan') ||
         lower.contains('[uc]')) {
@@ -2836,7 +2860,36 @@ class JarSpiderService {
 
     if (!hasSo) {
       final classpath = await _baseShims(jvmDir);
-      if (!hold) {
+      // 播放（hold）也必须常驻：普通 jar 的 `playerContent` 同样会回
+      // `http://127.0.0.1:9978/proxy?do=bili&…` 这类**宿主代理**地址
+      // （哔哩合集 / csp_Bili 就是这样），一次性进程打完结果即退出，地址随即
+      // 失效。挂上宿主代理 props，`com.github.catvod.Proxy` 才会监听，
+      // 播放器打到该 JVM 的真实端口才有响应。
+      if (hold) {
+        try {
+          return await _runHold(
+            java: java,
+            classpath: classpath,
+            jar: jar,
+            className: className,
+            method: method,
+            ext: ext,
+            args: args,
+            heap: '256m',
+            timeout: Duration(seconds: site.timeout + 120),
+            jvmDir: jvmDir,
+            extraProps: await _proxyProps(jar),
+          );
+        } on SourceException catch (e) {
+          await _releasePlayHost();
+          // 拿不到常驻 host 时仍退回一次性进程：远程直链的源不受影响。
+          AppLog.w(
+            'jar',
+            '--hold 失败，回退一次性进程 ${site.key} '
+                'method=$method: ${shorten(e.message, 160)}',
+          );
+        }
+      } else {
         try {
           return await _runServe(
             key: servePoolSuffix == null ? key : '$key$servePoolSuffix',

@@ -8,6 +8,7 @@ import 'dart:convert';
 class ProxyConfig {
   const ProxyConfig({
     this.enabled = false,
+    this.followSystem = true,
     this.type = 'http',
     this.host = '',
     this.port = 0,
@@ -15,7 +16,12 @@ class ProxyConfig {
     this.password = '',
   });
 
+  /// 手动启用内置代理；true 时忽略 [followSystem]。
   final bool enabled;
+
+  /// 跟随系统代理（Windows 的「局域网设置」/ 环境变量）。默认开：
+  /// Dart 的 HttpClient 不会自己读系统代理，不跟随就只能干等到超时。
+  final bool followSystem;
 
   /// `http` 或 `socks5`。
   final String type;
@@ -32,14 +38,16 @@ class ProxyConfig {
   String get typeLabel => isSocks5 ? 'SOCKS5' : 'HTTP';
 
   String get summary {
-    if (!enabled) return '直连';
-    if (!valid) return '代理配置不完整';
-    return '$typeLabel ${host.trim()}:$port'
-        '${username.trim().isEmpty ? '' : '（带认证）'}';
+    if (valid) {
+      return '$typeLabel ${host.trim()}:$port'
+          '${username.trim().isEmpty ? '' : '（带认证）'}';
+    }
+    return followSystem ? '跟随系统代理' : '直连';
   }
 
   ProxyConfig copyWith({
     bool? enabled,
+    bool? followSystem,
     String? type,
     String? host,
     int? port,
@@ -48,6 +56,7 @@ class ProxyConfig {
   }) {
     return ProxyConfig(
       enabled: enabled ?? this.enabled,
+      followSystem: followSystem ?? this.followSystem,
       type: type ?? this.type,
       host: host ?? this.host,
       port: port ?? this.port,
@@ -58,6 +67,7 @@ class ProxyConfig {
 
   Map<String, Object?> toJson() => {
     'enabled': enabled,
+    'followSystem': followSystem,
     'type': type,
     'host': host,
     'port': port,
@@ -73,6 +83,10 @@ class ProxyConfig {
     final type = (json['type'] ?? 'http').toString().toLowerCase();
     return ProxyConfig(
       enabled: json['enabled'] == true,
+      // 老配置没有这个键：按「跟随系统代理」处理（默认行为）。
+      followSystem: json['followSystem'] is bool
+          ? json['followSystem'] == true
+          : true,
       type: type == 'socks5' ? 'socks5' : 'http',
       host: (json['host'] ?? '').toString().trim(),
       port: port,
@@ -98,6 +112,7 @@ class ProxyConfig {
   bool operator ==(Object other) {
     return other is ProxyConfig &&
         other.enabled == enabled &&
+        other.followSystem == followSystem &&
         other.type == type &&
         other.host == host &&
         other.port == port &&
@@ -107,5 +122,5 @@ class ProxyConfig {
 
   @override
   int get hashCode =>
-      Object.hash(enabled, type, host, port, username, password);
+      Object.hash(enabled, followSystem, type, host, port, username, password);
 }

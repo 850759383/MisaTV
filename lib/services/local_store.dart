@@ -3,6 +3,7 @@ import 'dart:ui' show Size;
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/platform/portable_app_data.dart';
 import '../models/dav.dart';
 import '../models/drive_account.dart';
 import '../models/site_config.dart';
@@ -26,6 +27,7 @@ class LocalStore {
   static const kNavBarAutoHide = 'kniephos.navBarAutoHide';
   static const kHomeColumns = 'kniephos.homeColumns';
   static const kHomeBrowseMode = 'kniephos.homeBrowseMode';
+  static const kShowMovieQuotes = 'kniephos.showMovieQuotes';
   static const kFavorites = 'kniephos.favorites';
   static const kHistory = 'kniephos.history';
   static const kSearchHistory = 'kniephos.searchHistory';
@@ -50,6 +52,9 @@ class LocalStore {
     final prefs = await SharedPreferences.getInstance();
     return LocalStore(prefs);
   }
+
+  /// 重新从磁盘读取偏好（独立播放器窗口写回的历史/设置同步用）。
+  Future<void> reload() => reloadPortablePrefs();
 
   List<ConfigProfile> loadProfiles() {
     final raw = _prefs.getString(kProfiles);
@@ -233,6 +238,11 @@ class LocalStore {
   int get homeBrowseMode => _prefs.getInt(kHomeBrowseMode) ?? 0;
   Future<void> setHomeBrowseMode(int value) =>
       _prefs.setInt(kHomeBrowseMode, value);
+
+  /// 首页顶部是否显示影视台词轮换。
+  bool get showMovieQuotes => _prefs.getBool(kShowMovieQuotes) ?? true;
+  Future<void> setShowMovieQuotes(bool value) =>
+      _prefs.setBool(kShowMovieQuotes, value);
 
   /// 内置代理配置（JSON：enabled/type/host/port/username/password）。
   String get proxyJson => _prefs.getString(kProxy) ?? '';

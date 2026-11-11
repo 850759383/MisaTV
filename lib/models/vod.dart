@@ -101,6 +101,13 @@ class Episode {
   const Episode({required this.name, required this.url});
   final String name;
   final String url;
+
+  Map<String, dynamic> toJson() => {'name': name, 'url': url};
+
+  factory Episode.fromJson(Map<String, dynamic> json) => Episode(
+    name: (json['name'] ?? '').toString(),
+    url: (json['url'] ?? '').toString(),
+  );
 }
 
 class VodDetail {
@@ -142,6 +149,59 @@ class VodDetail {
 
   String get cleanPic => splitUrlHeadersClean(pic);
   Map<String, String> get picHeaders => splitUrlHeaders(pic);
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'pic': pic,
+    'type': type,
+    'year': year,
+    'area': area,
+    'director': director,
+    'actor': actor,
+    'des': des,
+    'remarks': remarks,
+    'flags': flags,
+    'episodes': {
+      for (final entry in episodes.entries)
+        entry.key: entry.value.map((e) => e.toJson()).toList(),
+    },
+    'sourceKey': sourceKey,
+  };
+
+  factory VodDetail.fromJson(Map<String, dynamic> json) {
+    final rawEpisodes = json['episodes'];
+    final episodes = <String, List<Episode>>{};
+    if (rawEpisodes is Map) {
+      for (final entry in rawEpisodes.entries) {
+        final list = entry.value;
+        if (list is! List) continue;
+        episodes[entry.key.toString()] = [
+          for (final item in list)
+            if (item is Map)
+              Episode.fromJson(Map<String, dynamic>.from(item)),
+        ];
+      }
+    }
+    return VodDetail(
+      id: (json['id'] ?? '').toString(),
+      name: (json['name'] ?? '').toString(),
+      pic: (json['pic'] ?? '').toString(),
+      type: (json['type'] ?? '').toString(),
+      year: (json['year'] ?? '').toString(),
+      area: (json['area'] ?? '').toString(),
+      director: (json['director'] ?? '').toString(),
+      actor: (json['actor'] ?? '').toString(),
+      des: (json['des'] ?? '').toString(),
+      remarks: (json['remarks'] ?? '').toString(),
+      flags: [
+        for (final item in (json['flags'] is List ? json['flags'] as List : const []))
+          item.toString(),
+      ],
+      episodes: episodes,
+      sourceKey: (json['sourceKey'] ?? '').toString(),
+    );
+  }
 }
 
 /// 最终播放地址是否可以直接交给播放器。
@@ -219,6 +279,29 @@ class PlayResult {
   final String externalLink;
 
   bool get playable => externalLink.isEmpty && isPlayableMediaUrl(url);
+
+  Map<String, dynamic> toJson() => {
+    'url': url,
+    'parse': parse,
+    'playUrl': playUrl,
+    'flag': flag,
+    'headers': headers,
+    'message': message,
+    'externalLink': externalLink,
+  };
+
+  factory PlayResult.fromJson(Map<String, dynamic> json) => PlayResult(
+    url: (json['url'] ?? '').toString(),
+    parse: (json['parse'] as num?)?.toInt() ?? 0,
+    playUrl: (json['playUrl'] ?? '').toString(),
+    flag: (json['flag'] ?? '').toString(),
+    headers: {
+      for (final entry in (json['headers'] is Map ? json['headers'] as Map : const {}).entries)
+        entry.key.toString(): entry.value.toString(),
+    },
+    message: (json['message'] ?? '').toString(),
+    externalLink: (json['externalLink'] ?? '').toString(),
+  );
 }
 
 class CmsResult {

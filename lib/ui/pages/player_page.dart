@@ -78,8 +78,25 @@ class PlayerSession {
 }
 
 class PlayerPage extends StatefulWidget {
-  const PlayerPage({super.key, required this.session});
+  const PlayerPage({
+    super.key,
+    required this.session,
+    this.onExit,
+    this.onSwitchSource,
+    this.onVideoAspect,
+  });
+
   final PlayerSession session;
+
+  /// 独立窗口模式下退出播放器（关闭子窗口）；为空 = 普通路由返回。
+  final Future<void> Function()? onExit;
+
+  /// 独立窗口模式下「换源」：把片名交给主窗口搜索，然后关闭子窗口。
+  final Future<void> Function(String keyword)? onSwitchSource;
+
+  /// 独立窗口模式下的竖版适配：拿到视频分辨率后回调（内嵌播放器传 null）。
+  final Future<void> Function(double videoWidth, double videoHeight)?
+  onVideoAspect;
 
   @override
   State<PlayerPage> createState() => _PlayerPageState();
@@ -247,6 +264,21 @@ class _PlayerPageState extends State<PlayerPage>
         ? _episodes[index].name.trim()
         : '';
     return name.isEmpty ? '第${index + 1}集' : name;
+  }
+
+  /// 独立窗口里按视频分辨率切竖版；内嵌播放器没有回调，什么都不做。
+  void _applyVideoAspect(VideoPlayerController controller) {
+    final apply = widget.onVideoAspect;
+    if (apply == null) return;
+    var size = controller.value.size;
+    if (size.width <= 0 || size.height <= 0) {
+      // fvp 偶尔不给 VideoPlayerValue 尺寸，退回 libmdk 的 MediaInfo。
+      final stats = _readMediaStats();
+      if (stats == null) return;
+      size = Size(stats.width.toDouble(), stats.height.toDouble());
+    }
+    if (size.width <= 0 || size.height <= 0) return;
+    unawaited(apply(size.width, size.height));
   }
 
   void _syncAudioTracks(VideoPlayerController controller) {
@@ -506,9 +538,10 @@ class _PlayerPageState extends State<PlayerPage>
     }
     if (!target.playable) {
       // 换集时没登录对应网盘：直接弹扫码，成功后自动重试一次。
+      // 可选增强（哔哩）跳过：没 Cookie 也会回低画质直链，重试只会白跑一次。
       if (allowLogin) {
         final hint = driveHintFromMessage(target.message);
-        if (hint != null && hint.supported) {
+        if (hint != null && hint.supported && !hint.optional) {
           if (!mounted) return false;
           final ready = await promptDriveLogin(
             context,
@@ -641,6 +674,7 @@ class _PlayerPageState extends State<PlayerPage>
       });
       _syncSleepInhibitor();
       _syncAudioTracks(controller);
+      _applyVideoAspect(controller);
       if (!_ephemeral) {
         await app.recordHistory(
           detail: _detail,
@@ -1318,10 +1352,12 @@ class _PlayerPageState extends State<PlayerPage>
     if (mounted) _toast(next ? '窗口已置顶（仅本次播放生效）' : '已取消窗口置顶');
   }
 
-  Future<void> _toggleMini() async {
-    if (!_isDesktop) return;
-    if (_fullscreen) await _toggleFullscreen();
-    final next = !_mini;
+  Future<void> _toggleMini() => _setMini(!_mini);
+
+  /// 展开 / 收起小窗；[announce] 只在用户手动切换时提示。
+  Future<void> _setMini(bool next, {bool announce = true}) async {
+    if (!_isDesktop || next == _mini) return;
+    if (next && _fullscreen) await _toggleFullscreen();
     if (next) {
       _pinnedBeforeMini = _alwaysOnTop;
       await enterMiniPlayerWindow();
@@ -1341,8 +1377,23 @@ class _PlayerPageState extends State<PlayerPage>
     });
     // exitMiniPlayerWindow 会把置顶关掉，这里恢复退出小窗后的选择。
     if (!next) await setAppWindowAlwaysOnTop(_alwaysOnTop);
-    if (next) _toast('小窗模式：窗口已置顶，点画面显示控制');
+    if (next && announce) _toast('小窗模式：窗口已置顶，点画面显示控制');
   }
+
+  Future<void> _exitPage() async {
+    // 独立窗口关闭后主窗口会重新读盘，先把最后进度落下来。
+    try {
+      await _saveProgress();
+    } catch (_) {}
+    final exit = widget.onExit;
+    if (exit != null) {
+      await exit();
+      return;
+    }
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  void _requestExit() => unawaited(_exitPage());
 
   @override
   void dispose() {
@@ -1437,7 +1488,7 @@ class _PlayerPageState extends State<PlayerPage>
       if (_fullscreen) {
         _toggleFullscreen();
       } else {
-        Navigator.of(context).maybePop();
+        _requestExit();
       }
       return KeyEventResult.handled;
     }
@@ -1449,6 +1500,11 @@ class _PlayerPageState extends State<PlayerPage>
     final name = _detail.name.trim();
     if (name.isEmpty) {
       _toast('没有可搜索的片名');
+      return;
+    }
+    final remote = widget.onSwitchSource;
+    if (remote != null) {
+      unawaited(remote(name));
       return;
     }
     AppScope.of(context).requestSearch(name);
@@ -1831,19 +1887,24 @@ class _PlayerPageState extends State<PlayerPage>
             'index=$_index 原地址=${redactUrl(play.url)} '
             'MPV地址=${redactUrl(source.url)} len=${source.url.length}',
       );
+      final playlist = await _externalPlaylistPath(currentUrl: source.url);
       await MpvExtension.instance.open(
-        source.url,
-        headers: source.headers,
-        startSeconds: _position.inSeconds,
+        playlist ?? source.url,
+        headers: playlist == null ? source.headers : const {},
+        startSeconds: playlist == null ? _position.inSeconds : 0,
       );
       // MPV 已在读本机 /chunk：页面 dispose 时保留取流 JVM，否则外部播放器 404。
       _handedToExternalPlayer = true;
       _app.sourceService.jar.holdPlaybackForExternal();
       if (!mounted) return;
-      _toast('已在 Yaozhi MPV 中打开');
+      _toast(
+        playlist == null
+            ? '已在 Yaozhi MPV 中打开'
+            : '已在 Yaozhi MPV 中打开（共 ${_episodes.length} 集选集）',
+      );
       // 已经交给外部播放器：退掉内置播放器页，控制器、置顶/小窗状态都随
       // dispose 释放；取流 JVM 由上面的 holdPlaybackForExternal 保活。
-      Navigator.of(context).maybePop();
+      unawaited(_exitPage());
     } catch (e, s) {
       AppLog.e('player', 'Yaozhi MPV 启动失败', e, s);
       _toast('$e');
@@ -2135,7 +2196,7 @@ class _PlayerPageState extends State<PlayerPage>
             children: [
               if (!mini)
                 IconButton(
-                  onPressed: () => Navigator.of(context).pop(),
+                  onPressed: _requestExit,
                   icon: const Icon(
                     Icons.arrow_back_rounded,
                     color: Colors.white,
@@ -3727,6 +3788,23 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+  /// 多集时生成 M3U 选集列表；单集或生成失败返回 null（回退单地址）。
+  Future<String?> _externalPlaylistPath({String? currentUrl}) async {
+    final service = _app.externalPlaylist;
+    if (service == null || _episodes.length < 2) return null;
+    final path = await service.createPlaylist(
+      site: _site,
+      flag: _flag,
+      episodes: _episodes,
+      currentIndex: _index,
+      currentUrl: currentUrl,
+    );
+    if (path == null) {
+      AppLog.w('player', '外部播放器选集列表生成失败，回退为单集地址');
+    }
+    return path;
+  }
+
   Future<void> _showExternalPlayers() async {
     final players = detectExternalPlayers(custom: _app.customExternalPlayers);
     if (players.isEmpty) {
@@ -3754,7 +3832,8 @@ class _PlayerPageState extends State<PlayerPage>
                 Text('外部播放器', style: Theme.of(ctx).textTheme.titleLarge),
                 const SizedBox(height: 6),
                 Text(
-                  '用本机播放器打开当前地址（带起播位置）；自定义播放器可在 设置 → 播放 中添加。',
+                  '用本机播放器打开当前集；多集时会把整份选集列表带过去，可在播放器片单里切集。'
+                  '自定义播放器可在 设置 → 播放 中添加。',
                   style: Theme.of(ctx).textTheme.bodySmall,
                 ),
                 const SizedBox(height: 8),
@@ -3815,19 +3894,27 @@ class _PlayerPageState extends State<PlayerPage>
     try {
       await _saveProgress();
       final source = _app.preparePlay(play, forceRelay: true);
+      // 多集时把整份选集列表交给外部播放器（M3U 每项回指本机中继）。
+      final playlist = await _externalPlaylistPath(currentUrl: source.url);
       final ok = launchExternalPlayer(
         player.path,
-        source.url,
-        extraArgs: externalSeekArgs(player.id, _position.inSeconds),
+        playlist ?? source.url,
+        extraArgs: playlist == null
+            ? externalSeekArgs(player.id, _position.inSeconds)
+            : const [],
       );
       if (ok) {
         // 外部播放器拿到的是本机 /chunk 地址：之后离开本页也不能回收取流 JVM。
         _handedToExternalPlayer = true;
         _app.sourceService.jar.holdPlaybackForExternal();
         if (!mounted) return;
-        _toast('已在 ${player.name} 中打开');
+        _toast(
+          playlist == null
+              ? '已在 ${player.name} 中打开'
+              : '已在 ${player.name} 中打开（共 ${_episodes.length} 集选集）',
+        );
         // 外部播放器已经接手：关闭内置播放器页，避免原视频继续在后台播放/占解码器。
-        Navigator.of(context).maybePop();
+        unawaited(_exitPage());
         return;
       }
       _toast('启动 ${player.name} 失败');

@@ -499,26 +499,41 @@ class ConfigParser {
     return v;
   }
 
+  /// 把订阅里的相对路径按订阅地址解析成绝对地址。
+  ///
+  /// 相对路径不只出现在 JSON 值开头，TVBox 订阅里还有两种写法，漏掉就会让蜘蛛
+  /// 拿到一个打不开的相对地址：`ext` 用 `$$$` 串多段文件
+  /// （`./lib/token.json$$$./json/a.txt`），以及 `ext` 是单引号包着的 JSON 串
+  /// （`{'token': './lib/token.json'}`）。
+  /// 所以 `./` / `../` 只在「字符串起头」和「`$$$` 之后」两种位置才当路径。
   static String fixContentPath(String baseUrl, String content) {
     final normalized = normalizeHostUrl(baseUrl);
     if (normalized.isEmpty || content.isEmpty) return content;
-    if (!content.contains('"./') && !content.contains('"../')) return content;
+    if (!content.contains('./') && !content.contains('../')) return content;
     if (!RegExp(r'^https?://', caseSensitive: false).hasMatch(normalized)) {
       return content;
     }
     final dir = normalized.substring(0, normalized.lastIndexOf('/') + 1);
     if (dir.isEmpty) return content;
-    String resolve(String rel) {
-      try {
-        return Uri.parse(dir).resolve(rel).toString();
-      } catch (_) {
-        return rel == './' ? dir : dir;
-      }
-    }
+    final dot = _resolveAgainst(dir, './');
+    final dotDot = _resolveAgainst(dir, '../');
+    const sep = r'$$$';
 
     return content
-        .replaceAll('"../', '"${resolve('../')}')
-        .replaceAll('"./', '"${resolve('./')}');
+        .replaceAll('"./', '"$dot')
+        .replaceAll('"../', '"$dotDot')
+        .replaceAll("'./", "'$dot")
+        .replaceAll("'../", "'$dotDot")
+        .replaceAll(r'$$$./', '$sep$dot')
+        .replaceAll(r'$$$../', '$sep$dotDot');
+  }
+
+  static String _resolveAgainst(String dir, String relative) {
+    try {
+      return Uri.parse(dir).resolve(relative).toString();
+    } catch (_) {
+      return dir;
+    }
   }
 
   static bool looksLikeSubscribeJson(String text) {

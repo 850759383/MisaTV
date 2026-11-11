@@ -19,6 +19,22 @@ class EpgProgram {
   final int endTime;
 
   String get range => '$start-$end';
+
+  Map<String, dynamic> toJson() => {
+    'title': title,
+    'start': start,
+    'end': end,
+    'startTime': startTime,
+    'endTime': endTime,
+  };
+
+  factory EpgProgram.fromJson(Map<String, dynamic> json) => EpgProgram(
+    title: (json['title'] ?? '').toString(),
+    start: (json['start'] ?? '').toString(),
+    end: (json['end'] ?? '').toString(),
+    startTime: (json['startTime'] as num?)?.toInt() ?? 0,
+    endTime: (json['endTime'] as num?)?.toInt() ?? 0,
+  );
 }
 
 class EpgEntry {
@@ -28,6 +44,20 @@ class EpgEntry {
   final EpgProgram? next;
 
   bool get hasData => current != null || next != null;
+
+  Map<String, dynamic> toJson() => {
+    if (current != null) 'current': current!.toJson(),
+    if (next != null) 'next': next!.toJson(),
+  };
+
+  factory EpgEntry.fromJson(Map<String, dynamic> json) => EpgEntry(
+    current: json['current'] is Map
+        ? EpgProgram.fromJson(Map<String, dynamic>.from(json['current'] as Map))
+        : null,
+    next: json['next'] is Map
+        ? EpgProgram.fromJson(Map<String, dynamic>.from(json['next'] as Map))
+        : null,
+  );
 }
 
 class EpgChannelRef {

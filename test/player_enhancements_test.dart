@@ -13,6 +13,25 @@ void main() {
       expect(playerFitLabel('ratio169'), '强制 16:9');
     });
 
+    test('独立窗口设置：沉浸观影模式下强制不生效', () {
+      final popOut = PlayerSettings.fromJson({'popOutPlayer': true});
+      expect(popOut.effectivePopOutPlayer, isTrue, reason: '普通模式按设置弹出');
+      expect(
+        popOut.copyWith(immersiveMode: true).effectivePopOutPlayer,
+        isFalse,
+        reason: '沉浸观影是独占全屏，独立窗口一律不弹',
+      );
+      expect(
+        popOut
+            .copyWith(immersiveMode: true)
+            .copyWith(immersiveMode: false)
+            .effectivePopOutPlayer,
+        isTrue,
+        reason: '退出沉浸观影后设置自动恢复',
+      );
+      expect(PlayerSettings.fromJson({}).effectivePopOutPlayer, isFalse);
+    });
+
     test('设置 JSON 往返保留画面比例与性能开关', () {
       final settings = PlayerSettings.fromJson({
         'speed': 1.25,
@@ -29,6 +48,7 @@ void main() {
         ],
         'defaultPlayer': 'custom:D:\\Tools\\vlc.exe',
         'immersiveMode': true,
+        'popOutPlayer': true,
         'artworkPriority': 'tmdb',
         'tmdbApiKey': 'tmdb-key',
         'bossKey': 'alt+q',
@@ -39,16 +59,35 @@ void main() {
       expect(settings.autoSwitchLine, isTrue);
       expect(settings.magnetDownloadDir, r'D:\BT下载');
       expect(settings.immersiveMode, isTrue);
+      expect(settings.popOutPlayer, isTrue);
       expect(settings.artworkPriority, 'tmdb');
       expect(settings.tmdbApiKey, 'tmdb-key');
       expect(settings.bossKey, 'alt+q');
       expect(PlayerSettings.fromJson({}).bossKey, kDefaultBossKey);
-      expect(PlayerSettings.fromJson({'bossKey': 'bogus'}).bossKey, 'ctrl+shift+b');
+      expect(
+        PlayerSettings.fromJson({'bossKey': 'bogus'}).bossKey,
+        'ctrl+shift+b',
+      );
       expect(PlayerSettings.fromJson({'bossKey': 'OFF'}).bossKey, 'off');
       expect(bossKeyLabel('f12'), 'F12');
       expect(settings.toJson()['bossKey'], 'alt+q');
+      // TMDB 两个凭据各存各的：v3 Key 走 query、v4 Token 走 Authorization 头。
+      final tmdb = PlayerSettings.fromJson({
+        'tmdbApiKey': '0123456789abcdef0123456789abcdef',
+        'tmdbReadToken': 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ4In0.sig',
+      });
+      expect(tmdb.tmdbApiKey, '0123456789abcdef0123456789abcdef');
+      expect(tmdb.tmdbReadToken, 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJ4In0.sig');
+      expect(tmdb.toJson()['tmdbReadToken'], tmdb.tmdbReadToken);
+      expect(
+        tmdb.copyWith(tmdbReadToken: '').tmdbReadToken,
+        isEmpty,
+        reason: '清空令牌不能把旧值留下',
+      );
+      expect(PlayerSettings.fromJson({}).tmdbReadToken, isEmpty);
       expect(normalizeArtworkPriority('IMDB'), 'imdb');
       expect(PlayerSettings.fromJson({}).immersiveMode, isFalse);
+      expect(PlayerSettings.fromJson({}).popOutPlayer, isFalse);
       expect(PlayerSettings.fromJson({}).artworkPriority, 'douban');
       expect(
         PlayerSettings.fromJson({'artworkPriority': 'bogus'}).artworkPriority,

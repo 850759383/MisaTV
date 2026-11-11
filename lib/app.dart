@@ -7,9 +7,11 @@ import 'state/app_state.dart';
 import 'ui/shell/app_shell.dart';
 import 'ui/widgets/app_backdrop.dart';
 import 'ui/widgets/app_title_bar.dart';
+import 'ui/widgets/update_gate.dart';
 
 class AppScope extends InheritedNotifier<AppState> {
-  const AppScope({super.key, required AppState state, required super.child}) : super(notifier: state);
+  const AppScope({super.key, required AppState state, required super.child})
+    : super(notifier: state);
 
   static AppState of(BuildContext context) {
     final scope = context.dependOnInheritedWidgetOfExactType<AppScope>();
@@ -97,7 +99,9 @@ class KniephosApp extends StatelessWidget {
               final theme = Theme.of(context);
               return windowFrame(
                 CustomPaint(
-                  painter: AppBackdropPainter(dark: theme.brightness == Brightness.dark),
+                  painter: AppBackdropPainter(
+                    dark: theme.brightness == Brightness.dark,
+                  ),
                   child: Column(
                     children: [
                       ValueListenableBuilder<bool>(
@@ -113,7 +117,8 @@ class KniephosApp extends StatelessWidget {
                 ),
               );
             },
-            home: const AppShell(),
+            // 启动后检查 GitHub release，有新版本就弹窗（见 UpdateGate）。
+            home: const UpdateGate(child: AppShell()),
           );
         },
       ),

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:path/path.dart' as p;
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:shared_preferences_platform_interface/types.dart';
 
@@ -50,6 +51,21 @@ Future<String?> enablePortableAppData() async {
   PathProviderPlatform.instance = _PortablePathProvider(target.path);
   SharedPreferencesStorePlatform.instance = PortablePrefsStore(target.path);
   return target.path;
+}
+
+/// 重新从磁盘读取偏好。
+///
+/// 独立播放器窗口（另一个引擎）写入的进度/设置，主窗口必须显式 reload
+/// 才能看到；本工程自带的 PortablePrefsStore 还有一层文件缓存，先失效。
+Future<void> reloadPortablePrefs() async {
+  final store = SharedPreferencesStorePlatform.instance;
+  if (store is PortablePrefsStore) store.invalidateCache();
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+  } catch (_) {
+    // 读取失败时保持当前内存值
+  }
 }
 
 bool _writable(Directory dir) {
@@ -165,6 +181,12 @@ class PortablePrefsStore extends SharedPreferencesStorePlatform {
   static const _defaultPrefix = 'flutter.';
 
   Map<String, Object>? _cache;
+
+  /// 丢弃文件缓存，下次读取重新从磁盘加载。
+  ///
+  /// 独立播放器窗口是另一个 Flutter 引擎/isolate，它写回的历史与设置
+  /// 主窗口看不到；同步前必须先让本 isolate 的缓存失效。
+  void invalidateCache() => _cache = null;
 
   File get _file => File(p.join(root, 'shared_preferences.json'));
 

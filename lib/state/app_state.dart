@@ -25,15 +25,19 @@ import '../services/danmaku/danmaku_settings.dart';
 import '../services/discover/discover_service.dart';
 import '../services/drive/drive_line_hint.dart';
 import '../services/drive/baidu_session.dart';
+import '../services/drive/bili_session.dart';
+import '../services/drive/pan115_session.dart';
 import '../services/drive/quark_session.dart';
 import '../services/drive/uc_session.dart';
 import '../services/artwork/artwork_service.dart';
 import '../services/jvm/jvm_runtime.dart';
 import '../services/kazumi/kazumi_rule.dart';
 import '../services/live/epg_service.dart';
+import '../services/player/external_playlist.dart';
 import '../services/player/external_players.dart';
 import '../services/player/skip_segments.dart';
 import '../services/relay/local_relay.dart';
+import '../services/relay/proxy_rules.dart';
 import '../services/live_service.dart';
 import '../services/local_store.dart';
 import '../services/parse/parse_service.dart';
@@ -104,10 +108,13 @@ class AppState extends ChangeNotifier {
   late final EpgService epgService = EpgService();
   late final DavService davService = DavService(store);
 
-  /// 免费代理池：设置页连点解锁后才显示，选中节点直接套进内置代理桥。
+  /// 免费代理池：设置页连点解锁后才显示。
+  ///
+  /// 它只记录「选中了哪个节点」，生效的代理由 [_applyEffectiveProxy] 统一决定，
+  /// 避免代理池和「网络代理」设置互相覆盖。
   late final ProxyPoolService proxyPool = ProxyPoolService(
     store: store,
-    applyProxy: setProxy,
+    onSelectionChanged: _applyEffectiveProxy,
   );
 
   /// 代理池入口是否已解锁（设置页连点 5 次）。
@@ -115,6 +122,9 @@ class AppState extends ChangeNotifier {
 
   /// 磁力（BT）播放编排：桌面端在 main 里注入；Web 版为 null。
   TorrentPlay? torrentPlay;
+
+  /// 第三方播放器的选集列表：桌面端在 main 里注入；Web 版为 null。
+  ExternalPlaylistService? externalPlaylist;
 
   /// 迅雷云盘（磁力离线下载）；桌面端 main 注入 TorrentPlay 时复用同一实例。
   late final XunleiCloudService xunleiCloudService = XunleiCloudService(
@@ -138,6 +148,12 @@ class AppState extends ChangeNotifier {
 
   /// 订阅解析出的基础配置（不含本地 Kazumi 规则源）。
   SiteConfig? _config;
+
+  /// 换配置时同步刷新「代理规则」：TVBox `rules[].hosts` 命中的请求走本机中继。
+  void _setConfig(SiteConfig? value) {
+    _config = value;
+    ProxyRules.current = ProxyRules.fromRules(value?.rules ?? const []);
+  }
 
   /// 用户导入的 Kazumi 规则；启动时合并进 [config]。
   List<KazumiRule> kazumiRules = const [];
@@ -212,6 +228,9 @@ class AppState extends ChangeNotifier {
 
   /// 首页分类浏览方式：0 = 换页（上一页 / 下一页），1 = 瀑布（滑到底自动加载）。
   int homeBrowseMode = 0;
+
+  /// 首页顶部是否显示影视台词轮换。
+  bool showMovieQuotes = true;
 
   /// 记住的启动窗口大小（逻辑像素）；null = 按显示器比例自动计算。
   Size? rememberedWindowSize;
@@ -476,7 +495,9 @@ class AppState extends ChangeNotifier {
           p,
     ];
     liveConfig = parsed.config;
-    if (profile.id == activeProfileId) _config = parsed.config;
+    if (profile.id == activeProfileId) {
+      _setConfig(parsed.config);
+    }
     final remaining = lives;
     if (remaining.isEmpty) {
       activeLiveKey = null;
@@ -580,7 +601,9 @@ class AppState extends ChangeNotifier {
     await sourceService.jar.purgeJarCaches(keep);
   }
 
-  Future<void> init() async {
+  /// [playerWindow] = 独立播放器子窗口：只加载播放必需的偏好与配置，
+  /// 不探测网盘登录态、不改档案、不清理 JAR 缓存，避免和主窗口互相干扰。
+  Future<void> init({bool playerWindow = false}) async {
     profiles = store.loadProfiles();
     activeProfileId = store.activeProfileId;
     activeSiteKey = store.activeSiteKey;
@@ -596,6 +619,7 @@ class AppState extends ChangeNotifier {
     navBarAutoHide = store.navBarAutoHide;
     homeColumns = store.homeColumns <= 0 ? 0 : store.homeColumns.clamp(4, 8);
     homeBrowseMode = store.homeBrowseMode == 1 ? 1 : 0;
+    showMovieQuotes = store.showMovieQuotes;
     rememberedWindowSize = store.loadWindowSize();
     eulaAccepted = store.eulaAccepted;
     favorites = store.loadFavorites()
@@ -607,15 +631,14 @@ class AppState extends ChangeNotifier {
     sourceService.js.setWorkerCount(playerSettings.jsWorkerPool ? 3 : 1);
     sourceService.jar.setKeepHostsWarm(playerSettings.keepSpiderHosts);
     proxy = ProxyConfig.fromJsonString(store.proxyJson);
-    await ProxyRuntime.instance.apply(proxy);
     proxyPoolUnlocked = store.proxyPoolUnlocked;
     proxyPool.load();
-    // 上次选中的节点要重新套进代理桥；列表超过一天就后台静默更新。
-    unawaited(proxyPool.restoreSelection());
+    // 先按「手动代理 > 代理池节点 > 跟随系统」算出生效代理，再决定要不要后台刷新列表。
+    await _applyEffectiveProxy();
     unawaited(proxyPool.autoRefreshIfDue());
     skipSegments = store.loadSkipSegments();
     driveAccounts = store.loadDriveAccounts();
-    xunleiCloudService.load();
+    if (!playerWindow) xunleiCloudService.load();
     davService.load();
     localLives = store.loadLocalLives();
     assrtToken = store.assrtToken;
@@ -630,10 +653,15 @@ class AppState extends ChangeNotifier {
         .where((rule) => rule.valid)
         .toList();
     _syncDriveTokens();
-    // 启动时探测夸克 / UC / 百度登录态（吸收新 __puus / 识别访客 Cookie），不阻塞首屏。
-    unawaited(_refreshDriveSession('quark'));
-    unawaited(_refreshDriveSession('uc'));
-    unawaited(_refreshDriveSession('baidu'));
+    if (!playerWindow) {
+      // 启动时探测已保存的网盘登录态（吸收新 __puus / 识别访客 Cookie），不阻塞首屏。
+      // 115 与哔哩只做「有凭据才探」：没有凭据时 _refreshDriveSession 会直接返回。
+      unawaited(_refreshDriveSession('quark'));
+      unawaited(_refreshDriveSession('uc'));
+      unawaited(_refreshDriveSession('baidu'));
+      unawaited(_refreshDriveSession('115'));
+      unawaited(_refreshDriveSession('bili'));
+    }
     final active = activeProfile;
     // 老版本把纯直播订阅当成点播档案：启动时把点播切回第一个真正含站点的档案。
     if (active != null && active.isLiveOnly && activeLiveProfileId == null) {
@@ -658,7 +686,8 @@ class AppState extends ChangeNotifier {
           : null;
     }
     jarReady = await JvmRuntime.instance.installed();
-    if (jarReady &&
+    if (!playerWindow &&
+        jarReady &&
         profiles.any(
           (p) => p.report.items.any((i) => i.reason == 'UNSUPPORTED_JAR'),
         )) {
@@ -667,9 +696,11 @@ class AppState extends ChangeNotifier {
     _loadActiveConfig();
     _loadActiveLiveConfig();
     _syncGlobalJar();
-    await store.setActiveProfileId(activeProfileId);
-    await store.setActiveLiveProfileId(activeLiveProfileId);
-    await _purgeUnusedJars();
+    if (!playerWindow) {
+      await store.setActiveProfileId(activeProfileId);
+      await store.setActiveLiveProfileId(activeLiveProfileId);
+      await _purgeUnusedJars();
+    }
     ready = true;
     notifyListeners();
     AppLog.i(
@@ -680,12 +711,38 @@ class AppState extends ChangeNotifier {
     );
   }
 
+  /// 独立播放器窗口关闭后，把另一个引擎写回的历史与设置重新读进主窗口。
+  ///
+  /// 两个窗口是不同 Flutter 引擎、不同 isolate，不能共享内存对象；子窗口
+  /// 写 shared_preferences 后主窗口必须 reload 才能看到最新进度。
+  Future<void> reloadUserDataFromStore() async {
+    await store.reload();
+    favorites = store.loadFavorites()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    history = store.loadHistory()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    searchHistory = store.loadSearchHistory();
+    playerSettings = store.loadPlayerSettings();
+    sourceService.js.setWorkerCount(playerSettings.jsWorkerPool ? 3 : 1);
+    sourceService.jar.setKeepHostsWarm(playerSettings.keepSpiderHosts);
+    skipSegments = store.loadSkipSegments();
+    driveAccounts = store.loadDriveAccounts();
+    _syncDriveTokens();
+    assrtToken = store.assrtToken;
+    customSubtitleApis = store.customSubtitleApis;
+    danmakuSettings = DanmakuSettings.fromJsonString(store.danmakuSettingsJson);
+    contentFilter = ContentFilterSettings.fromJsonString(
+      store.contentFilterJson,
+    );
+    notifyListeners();
+  }
+
   void _loadActiveConfig() {
     // 换档案 / 恢复备份后，旧订阅的同关键词结果不能继续命中。
     searchService.clearCache();
     final profile = activeProfile;
     if (profile == null) {
-      _config = null;
+      _setConfig(null);
       activeSiteKey = null;
       _syncGlobalJar();
       return;
@@ -696,14 +753,14 @@ class AppState extends ChangeNotifier {
         parsed.config,
         profile.deletedSiteKeys,
       );
-      _config = effective;
+      _setConfig(effective);
       final current = activeSiteKey;
       final valid = config?.sites.any((s) => s.key == current) ?? false;
       if (!valid) {
         activeSiteKey = fallbackSite?.key;
       }
     } catch (_) {
-      _config = null;
+      _setConfig(null);
       activeSiteKey = null;
     }
     // 全局 spider jar 必须跟着当前档案一起换：切换到另一份订阅后仍用旧 jar，
@@ -1320,7 +1377,7 @@ class AppState extends ChangeNotifier {
     // 点播：纯直播订阅（M3U / TXT / 只有 lives 的 JSON）不碰点播档案。
     if (!liveOnly && (activate || activeProfileId == profile.id)) {
       activeProfileId = profile.id;
-      _config = effective;
+      _setConfig(effective);
       _syncGlobalJar();
       if (!(config?.sites.any((s) => s.key == activeSiteKey) ?? false)) {
         activeSiteKey = fallbackSite?.key;
@@ -1685,7 +1742,7 @@ class AppState extends ChangeNotifier {
           p,
     ];
     if (profile.id == activeProfileId) {
-      _config = effective;
+      _setConfig(effective);
       if (!(config?.sites.any((s) => s.key == activeSiteKey) ?? false)) {
         activeSiteKey = fallbackSite?.key;
         await store.setActiveSiteKey(activeSiteKey);
@@ -1807,7 +1864,7 @@ class AppState extends ChangeNotifier {
         else
           p,
     ];
-    _config = parsed.config;
+    _setConfig(parsed.config);
     if (!(config?.sites.any((s) => s.key == activeSiteKey) ?? false)) {
       activeSiteKey = fallbackSite?.key;
       await store.setActiveSiteKey(activeSiteKey);
@@ -1860,7 +1917,7 @@ class AppState extends ChangeNotifier {
           p,
     ];
     if (profile.id == activeProfileId) {
-      _config = effective;
+      _setConfig(effective);
       if (!(config?.sites.any((s) => s.key == activeSiteKey) ?? false)) {
         activeSiteKey = fallbackSite?.key;
         await store.setActiveSiteKey(activeSiteKey);
@@ -1928,7 +1985,7 @@ class AppState extends ChangeNotifier {
         else
           p,
     ];
-    _config = parsed.config;
+    _setConfig(parsed.config);
     if (!(config?.sites.any((s) => s.key == activeSiteKey) ?? false)) {
       activeSiteKey = fallbackSite?.key;
       await store.setActiveSiteKey(activeSiteKey);
@@ -2019,6 +2076,14 @@ class AppState extends ChangeNotifier {
         host.contains('bcebos.com')) {
       return 'baidu';
     }
+    // 哔哩 CDN（bilivideo / hdslb）按 Referer 防盗链，必须经中继补头；
+    // 未登录只有 360P / 480P 时同样如此。
+    if (host.endsWith('bilibili.com') ||
+        host.endsWith('bilivideo.com') ||
+        host.endsWith('bilivideo.cn') ||
+        host.endsWith('hdslb.com')) {
+      return 'bili';
+    }
     final hint = driveHintFromFlag(flag);
     return hint != null && hint.supported ? hint.provider : '';
   }
@@ -2076,6 +2141,7 @@ class AppState extends ChangeNotifier {
     'navBarAutoHide': navBarAutoHide,
     'homeColumns': homeColumns,
     'homeBrowseMode': homeBrowseMode,
+    'showMovieQuotes': showMovieQuotes,
   };
 
   /// 还原备份（原生备份或旧版 Win-Box 备份，由 [BackupData.parse] 归一）。
@@ -2207,6 +2273,7 @@ class AppState extends ChangeNotifier {
         ((data['homeBrowseMode'] as num?)?.toInt() ?? homeBrowseMode) == 1
         ? 1
         : 0;
+    showMovieQuotes = data['showMovieQuotes'] as bool? ?? showMovieQuotes;
 
     if (data['kazumiRules'] is List) {
       final rules = <KazumiRule>[];
@@ -2256,6 +2323,7 @@ class AppState extends ChangeNotifier {
     await store.setNavBarAutoHide(navBarAutoHide);
     await store.setHomeColumns(homeColumns);
     await store.setHomeBrowseMode(homeBrowseMode);
+    await store.setShowMovieQuotes(showMovieQuotes);
     await _purgeUnusedJars();
     notifyListeners();
   }
@@ -2317,6 +2385,14 @@ class AppState extends ChangeNotifier {
     if (next == homeBrowseMode) return;
     homeBrowseMode = next;
     await store.setHomeBrowseMode(next);
+    notifyListeners();
+  }
+
+  /// 切换首页顶部影视台词轮换的显示。
+  Future<void> setShowMovieQuotes(bool value) async {
+    if (value == showMovieQuotes) return;
+    showMovieQuotes = value;
+    await store.setShowMovieQuotes(value);
     notifyListeners();
   }
 
@@ -2697,11 +2773,43 @@ class AppState extends ChangeNotifier {
     if (next == proxy) return;
     proxy = next;
     await store.setProxyJson(next.toJsonString());
-    await ProxyRuntime.instance.apply(next);
-    await sourceService.jar.resetForNetworkChange();
+    await _applyEffectiveProxy();
     notifyListeners();
-    AppLog.i('proxy', '内置代理已更新：${next.summary}');
   }
+
+  /// 决定「到底走哪个代理」，全应用只此一处：
+  ///
+  ///   1. 手动代理（设置里填了地址端口）最优先；
+  ///   2. 其次是代理池里选中的节点，但要先确认它连得上——公共代理大量失效，
+  ///      用它会把所有请求拖成超时；
+  ///   3. 都不是就用用户设置里的「跟随系统代理 / 直连」。
+  Future<void> _applyEffectiveProxy() async {
+    final manual = proxy.valid ? proxy : null;
+    final node = proxyPool.selected;
+    ProxyConfig effective = proxy;
+    var source = proxy.followSystem ? '跟随系统代理' : '直连';
+    if (manual != null) {
+      effective = manual;
+      source = '手动代理';
+    } else if (node != null) {
+      if (await _reachable(node.host, node.port)) {
+        effective = ProxyPoolService.configOf(node);
+        source = '代理池 ${node.address}';
+      } else {
+        AppLog.w(
+          'proxy',
+          '代理池节点 ${node.address} 连不上，本次跳过（回落到${proxy.followSystem ? '跟随系统代理' : '直连'}）',
+        );
+      }
+    }
+    await ProxyRuntime.instance.apply(effective);
+    await sourceService.jar.resetForNetworkChange();
+    AppLog.i('proxy', '生效代理：$source → ${ProxyRuntime.instance.summary}');
+  }
+
+  /// 公共代理是否还活着（TCP 探测在 ProxyRuntime 里做，这里保持平台无关）。
+  Future<bool> _reachable(String host, int port) =>
+      ProxyRuntime.instance.isReachable(host, port);
 
   /// 解锁代理池入口（设置页连点 5 次），解锁状态持久化。
   Future<void> unlockProxyPool() async {
@@ -2740,26 +2848,38 @@ class AppState extends ChangeNotifier {
       ..addEntries(
         driveAccounts.entries
             .where((e) => e.value.cookie.trim().isNotEmpty)
-            // 夸克 / UC / 百度访客态（require login [guest]）不能注入：只会让
-            // 蜘蛛返回 404 / 空数据，应该走登录弹窗重新扫码。
-            .where(
-              (e) =>
-                  !((e.key == 'quark' || e.key == 'uc' || e.key == 'baidu') &&
-                      e.value.extra['guest'] == 'true'),
-            )
+            // 确认访客态的凭据不能注入：只会让蜘蛛返回 404 / 空数据，应该走
+            // 登录 / 重新粘贴重来。哔哩不在此列 —— 它的 Cookie 是画质增强，
+            // 过期 Cookie 只会降画质，filter 掉反而连 360P 的登录态也没有了。
+            .where((e) => !_isGuestCredential(e.key, e.value.extra['guest']))
             .map((e) => MapEntry(e.key, e.value.cookie.trim())),
       );
+  }
+
+  /// 该凭据是否已被在线探测判为访客态（不能注入蜘蛛）。
+  ///
+  /// 115 同样是硬门槛（UID / CID / SEID 缺一或过期都取不到流），一并过滤；
+  /// 哔哩是可选增强，**永远不丢**，否则用户配好的 Cookie 会被一次风控探测误清。
+  static bool _isGuestCredential(String provider, String? guest) {
+    if (guest != 'true') return false;
+    return provider == 'quark' ||
+        provider == 'uc' ||
+        provider == 'baidu' ||
+        provider == '115';
   }
 
   bool hasDriveAccount(String provider) {
     final account = driveAccounts[provider];
     if (account == null) return false;
-    if ((provider == 'quark' || provider == 'uc' || provider == 'baidu') &&
-        account.extra['guest'] == 'true') {
-      return false;
-    }
+    if (_isGuestCredential(provider, account.extra['guest'])) return false;
     return account.cookie.trim().isNotEmpty;
   }
+
+  /// 该 Cookie 是否属于「可选增强」：没有也能播，只是画质 / 可用性受限。
+  ///
+  /// 哔哩哔哩就是这种：不登录照样能取到 360P / 480P 的 `durl`，配上 Cookie
+  /// 才有高清与大会员画质。所以缺它时**不能**弹登录窗、也不能阻断播放。
+  static bool isOptionalDriveProvider(String provider) => provider == 'bili';
 
   /// 供 JS 蜘蛛 `local` 读取的种子键（wex 系 jar 的 SharedPreferences 同义位置）。
   Map<String, String> get driveLocalSeed {
@@ -2777,14 +2897,23 @@ class AppState extends ChangeNotifier {
   /// 播放 / 取流时网盘凭据疑似失效（如夸克 download 404）：按需刷新会话再重试。
   /// 对齐 winbox：蜘蛛只在 init 读一次 cookie，旧 `__puus` 必须由 `/member` 补发。
   Future<void> refreshDriveSession(String provider) async {
-    if (provider != 'quark' && provider != 'uc' && provider != 'baidu') return;
+    if (!_refreshableProviders.contains(provider)) return;
     AppLog.i('drive', '刷新网盘会话 provider=$provider');
     await _refreshDriveSession(provider);
   }
 
-  /// 探测夸克 / UC 登录态：吸收 `/member` 下发的新 `__puus`；若确认是访客态则标记
-  /// `extra.guest=true`，让 `hasDriveAccount` / `_syncDriveTokens` 把这条凭据当成
-  /// 「未登录」——否则蜘蛛会拿着访客 Cookie 去 download，只回 HTTP 404 / 空数据。
+  /// 支持在线探测登录态的 provider（其余只有 Cookie 文本，没有校验接口）。
+  static const _refreshableProviders = <String>{
+    'quark',
+    'uc',
+    'baidu',
+    '115',
+    'bili',
+  };
+
+  /// 探测夸克 / UC / 百度 / 115 / 哔哩登录态：吸收响应下发的新 Cookie；若确认是
+  /// 访客态则标记 `extra.guest=true`，让 `hasDriveAccount` / `_syncDriveTokens`
+  /// 把这条凭据当成「未登录」——否则蜘蛛会拿着访客 Cookie 去取流，只回空数据。
   Future<void> _refreshDriveSession(String provider) async {
     if (_refreshingDriveSessions.contains(provider)) return;
     final account = driveAccounts[provider];
@@ -2793,6 +2922,8 @@ class AppState extends ChangeNotifier {
     final label = switch (provider) {
       'quark' => '夸克',
       'uc' => 'UC',
+      '115' => '115',
+      'bili' => '哔哩哔哩',
       _ => '百度',
     };
     _refreshingDriveSessions.add(provider);
@@ -2800,11 +2931,13 @@ class AppState extends ChangeNotifier {
       final result = switch (provider) {
         'quark' => await refreshQuarkSession(cookie),
         'uc' => await refreshUcSession(cookie),
+        '115' => await refreshPan115Session(cookie),
+        'bili' => await refreshBiliSession(cookie),
         _ => await refreshBaiduSession(cookie),
       };
       final wasGuest = account.extra['guest'] == 'true';
       if (result.valid == false) {
-        AppLog.w('drive', '$label会话判定为访客态（后续播放会要求重新扫码）');
+        AppLog.w('drive', '$label会话判定为访客态（这条凭据不会再注入蜘蛛）');
         if (!wasGuest) {
           final next = account.copyWith(
             extra: {...account.extra, 'guest': 'true'},
@@ -2869,7 +3002,7 @@ class AppState extends ChangeNotifier {
       'drive',
       '保存网盘账号 provider=$provider user=${shorten(account.username, 40)}',
     );
-    if (provider == 'quark' || provider == 'uc' || provider == 'baidu') {
+    if (_refreshableProviders.contains(provider)) {
       unawaited(_refreshDriveSession(provider));
     }
   }

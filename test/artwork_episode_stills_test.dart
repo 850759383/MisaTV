@@ -301,7 +301,10 @@ void main() {
       });
       final service = ArtworkService(
         AppHttp(client: client),
-        () => const PlayerSettings(tmdbApiKey: 'test-key'),
+        // v3 Key 是 32 位十六进制，用格式合法的假值，别把「格式校验」当成业务失败。
+        () => const PlayerSettings(
+          tmdbApiKey: '0123456789abcdef0123456789abcdef',
+        ),
       );
 
       final stills = await service.episodeStills(

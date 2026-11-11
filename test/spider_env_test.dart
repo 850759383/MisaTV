@@ -84,4 +84,61 @@ void main() {
     final cloud = File(p.join(root.path, 'tvfan', 'Cloud-drive.txt'));
     expect((jsonDecode(cloud.readAsStringSync()) as Map).containsKey('quarkCookie'), isFalse);
   });
+
+  test('哔哩 / 115 落到 TVBox 站点 Cookie 通道', () async {
+    final root = Directory.systemTemp.createTempSync('spider_env_test_');
+    addTearDown(() {
+      try {
+        root.deleteSync(recursive: true);
+      } catch (_) {}
+    });
+    final cache = p.join(root.path, 'jvm_cache', 'spider');
+    const bili = 'SESSDATA=bili; bili_jct=jct';
+    const pan115 = 'UID=1; CID=2; SEID=3';
+    await SpiderEnv.sync(
+      spiderCacheDir: cache,
+      cookies: const {'bili': bili, '115': pan115},
+      tmpDir: root.path,
+      dataDir: root.path,
+    );
+
+    // 订阅里 csp_Bili 的 ext 写的就是这个中继地址，内容必须是裸 Cookie 串。
+    expect(
+      File(p.join(root.path, 'TVBox', 'bili_cookie.txt')).readAsStringSync(),
+      bili,
+    );
+    expect(
+      File(p.join(root.path, 'TVBox', '115.txt')).readAsStringSync(),
+      pan115,
+    );
+    // wex 系 / prefs 种子也同步一份，覆盖读 prefs 的 jar。
+    expect(
+      File(p.join(cache, 'files', 'TV', '.115cookie')).readAsStringSync(),
+      pan115,
+    );
+    final seed =
+        File(p.join(cache, 'shared_prefs', 'seed.txt')).readAsStringSync();
+    expect(seed, contains('Wex_115_cookie\t$pan115'));
+
+    // 解绑后写入空文件（不是删除）：中继对缺失文件回 404 + 中文正文，
+    // 蜘蛛会把那段正文当 Cookie 用，反而更糟。
+    await SpiderEnv.sync(
+      spiderCacheDir: cache,
+      cookies: const {},
+      tmpDir: root.path,
+      dataDir: root.path,
+    );
+    expect(
+      File(p.join(root.path, 'TVBox', 'bili_cookie.txt')).readAsStringSync(),
+      '',
+    );
+    expect(
+      File(p.join(root.path, 'TVBox', '115.txt')).readAsStringSync(),
+      '',
+    );
+    expect(
+      File(p.join(cache, 'files', 'TV', '.115cookie')).existsSync(),
+      isFalse,
+    );
+  });
 }

@@ -73,9 +73,10 @@ Flutter 重写，单进程、无账号、无遥测，数据只保存在本机。
 - [X] 聚合搜索：多源并发流式返回，CMS / JS / PY / JAR 各自独立并发，按名称 + 年份去重并标注来源
 - [X] 发现与详情：豆瓣元数据补全（封面 / 简介 / 评分 / 演职员 / 相关推荐 / 影评），封面兜底与本地 `/img` 中继
 - [X] 播放：进度记忆、自动连播、倍速、全屏、多音轨、6 种画面比例、跳过片头片尾、长按临时倍速、桌面小窗
+- [X] 独立播放器窗口：内置播放器可弹到软件主界面之外的独立窗口播放，主界面保持可见（沉浸观影模式下自动不生效）
 - [X] 播放增强：弹幕（28 个内置接口 + 自定义）、外挂字幕（SubtitleCat / assrt / 自定义 API）、DLNA 投屏、外部播放器（PotPlayer / VLC / mpv / MPC-HC / 自定义 exe）
 - [X] 本地中继 `127.0.0.1:9978`：UA / Referer / Cookie 注入、m3u8 分片与密钥递归改写、可选去广告、网盘直链、WebDAV Basic、BT Range 取流
-- [X] 网盘：夸克 / UC / 百度网页扫码登录（WebView2），Cookie 注入 jar 系蜘蛛，夸克 `/member` 会话刷新
+- [X] 网盘：夸克 / UC / 百度网页扫码登录（WebView2），115 / 哔哩手动粘贴 Cookie，Cookie 注入 jar 系蜘蛛，夸克 `/member` 会话刷新；哔哩 Cookie 为可选增强，不配也能播 360P / 480P
 - [X] 磁力（BT）：内置 aria2c sidecar，边下边播、按体积与集名选片、`/bt` piece 门控
 - [X] 直播：TXT / M3U / JSON 订阅与 type=3 直播蜘蛛，分组与多线路、EPG（当前 / 下一档）、导出 TXT / M3U
 - [X] WebDAV 只读直连（OpenList / AList / Nextcloud / 群晖 / 坚果云）

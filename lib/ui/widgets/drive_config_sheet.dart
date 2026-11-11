@@ -72,7 +72,8 @@ class DriveConfigPanel extends StatefulWidget {
 }
 
 class _DriveConfigPanelState extends State<DriveConfigPanel> {
-  static const _providers = ['quark', 'uc', 'baidu'];
+  /// 面板里列出的凭据：能扫码的三家 + 只能手动粘贴的 115 / 哔哩。
+  static const _providers = ['quark', 'uc', 'baidu', '115', 'bili'];
 
   String get _actionText {
     final item = widget.item;
@@ -132,6 +133,10 @@ class _DriveConfigPanelState extends State<DriveConfigPanel> {
   }
 
   Future<void> _login(String provider) async {
+    if (!driveSupportsWebLogin(provider)) {
+      await _manualCookie(provider);
+      return;
+    }
     final ok = await showDriveLoginDialog(context, provider);
     if (!mounted) return;
     setState(() {});
@@ -368,13 +373,18 @@ class _DriveAccountRow extends StatelessWidget {
     final cookie = (account?.cookie ?? '').trim();
     final guest = account?.extra['guest'] == 'true';
     final loggedIn = cookie.isNotEmpty;
+    final optional = provider == 'bili';
     final status = guest
-        ? '访客态，需要重新登录'
+        ? (optional ? 'Cookie 已失效，可重新粘贴' : '访客态，需要重新登录')
         : loggedIn
         ? '已登录'
+        : optional
+        ? '未配置（仅能播 360P / 480P）'
         : '未登录';
     final statusColor = guest
-        ? theme.colorScheme.error
+        ? (optional
+              ? theme.colorScheme.onSurface.withValues(alpha: 0.55)
+              : theme.colorScheme.error)
         : loggedIn
         ? theme.colorScheme.primary
         : theme.colorScheme.onSurface.withValues(alpha: 0.55);
@@ -418,7 +428,11 @@ class _DriveAccountRow extends StatelessWidget {
           ),
           OutlinedButton(
             onPressed: onLogin,
-            child: Text(loggedIn ? '更新' : '登录'),
+            child: Text(
+              driveSupportsWebLogin(provider)
+                  ? (loggedIn ? '更新' : '登录')
+                  : (loggedIn ? '更新 Cookie' : '粘贴 Cookie'),
+            ),
           ),
           if (loggedIn)
             IconButton(

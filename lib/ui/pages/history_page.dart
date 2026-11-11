@@ -7,6 +7,7 @@ import '../../models/user_data.dart';
 import '../../models/vod.dart';
 import '../../services/drive/drive_line_hint.dart';
 import '../../state/app_state.dart';
+import '../open_player.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/glass.dart';
 import '../widgets/hover_marquee_text.dart';
@@ -27,6 +28,9 @@ class _HistoryPageState extends State<HistoryPage> {
 
   /// null = 全部来源。
   String? _sourceKey;
+
+  /// 续播请求进行中：连续点击历史卡片时只拉起一个播放器。
+  bool _resuming = false;
 
   @override
   void dispose() {
@@ -376,6 +380,16 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 
   Future<void> _resume(BuildContext context, HistoryItem item) async {
+    if (_resuming) return;
+    _resuming = true;
+    try {
+      await _resumeInner(context, item);
+    } finally {
+      _resuming = false;
+    }
+  }
+
+  Future<void> _resumeInner(BuildContext context, HistoryItem item) async {
     final app = AppScope.of(context);
     final site = _siteOf(app, item.sourceKey);
     if (site == null) {
@@ -407,55 +421,53 @@ class _HistoryPageState extends State<HistoryPage> {
         RegExp(r'/chunk|/proxy').hasMatch(raw);
     final isDriveLine = driveHintFromFlag(item.flag) != null;
 
-    // ★ 非网盘线路的详情就是完整选集列表。续播时先拉一次详情，
+    // ★ 详情就是完整选集列表。续播时先拉一次详情，网盘线路也不例外，
     //   否则历史里只带当前这一集，播放器选集栏只有一集、上下集按钮也切不动。
-    //   网盘线路仍保持原来的单集重取链逻辑（详情可能很慢/要登录）。
+    //   详情拉取失败时再回落到后面的单集重取链逻辑。
     VodDetail? full;
-    if (!isDriveLine) {
-      try {
-        full = await app.sourceService.detail(site, item.vodId);
-      } catch (_) {
-        full = null;
-      }
-      if (!context.mounted) return;
-      if (full != null && full.flags.isNotEmpty) {
-        final flag = full.flags.contains(item.flag)
-            ? item.flag
-            : full.flags.first;
-        final episodes = full.episodeList(flag);
-        if (episodes.isNotEmpty) {
-          final sameLine = flag == item.flag;
-          final index = _findEpisodeIndex(
-            episodes,
-            item,
-            raw,
-            sameLine: sameLine,
-          );
-          final canUseDirect =
-              sameLine && !staleLocal && raw.startsWith('http');
-          await Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => PlayerPage(
-                session: PlayerSession(
-                  detail: full!,
-                  site: site,
-                  flag: flag,
-                  episodeIndex: index,
-                  episodes: episodes,
-                  initialPlay: canUseDirect
-                      ? PlayResult(
-                          url: raw,
-                          flag: flag,
-                          headers: splitUrlHeaders(item.url),
-                        )
-                      : null,
-                  startPositionMs: item.positionMs,
-                ),
-              ),
-            ),
-          );
-          return;
-        }
+    try {
+      full = await app.sourceService.detail(site, item.vodId);
+    } catch (_) {
+      full = null;
+    }
+    if (!context.mounted) return;
+    if (full != null && full.flags.isNotEmpty) {
+      final flag = full.flags.contains(item.flag)
+          ? item.flag
+          : full.flags.first;
+      final episodes = full.episodeList(flag);
+      if (episodes.isNotEmpty) {
+        final sameLine = flag == item.flag;
+        final index = _findEpisodeIndex(
+          episodes,
+          item,
+          raw,
+          sameLine: sameLine,
+        );
+        // 网盘线路的已解析地址是带 Cookie/临时取流的地址，不能直接复用，
+        // 统一交给播放器用原始集数地址重新取链。
+        final canUseDirect =
+            !isDriveLine && sameLine && !staleLocal && raw.startsWith('http');
+        await openVodPlayer(
+          context,
+          app,
+          PlayerSession(
+            detail: full,
+            site: site,
+            flag: flag,
+            episodeIndex: index,
+            episodes: episodes,
+            initialPlay: canUseDirect
+                ? PlayResult(
+                    url: raw,
+                    flag: flag,
+                    headers: splitUrlHeaders(item.url),
+                  )
+                : null,
+            startPositionMs: item.positionMs,
+          ),
+        );
+        return;
       }
     }
 
@@ -471,19 +483,17 @@ class _HistoryPageState extends State<HistoryPage> {
         flag: item.flag,
         headers: splitUrlHeaders(item.url),
       );
-      await Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => PlayerPage(
-            session: PlayerSession(
-              detail: detail,
-              site: site,
-              flag: item.flag,
-              episodeIndex: 0,
-              episodes: detail.episodeList(item.flag),
-              initialPlay: play,
-              startPositionMs: item.positionMs,
-            ),
-          ),
+      await openVodPlayer(
+        context,
+        app,
+        PlayerSession(
+          detail: detail,
+          site: site,
+          flag: item.flag,
+          episodeIndex: 0,
+          episodes: detail.episodeList(item.flag),
+          initialPlay: play,
+          startPositionMs: item.positionMs,
         ),
       );
       return;
@@ -492,18 +502,16 @@ class _HistoryPageState extends State<HistoryPage> {
     if (storedRaw.isNotEmpty) {
       // 新记录：拿原始集数地址交给播放器重新取链（网盘源的临时地址不会再被复用）。
       final detail = synthetic(storedRaw);
-      await Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => PlayerPage(
-            session: PlayerSession(
-              detail: detail,
-              site: site,
-              flag: item.flag,
-              episodeIndex: 0,
-              episodes: detail.episodeList(item.flag),
-              startPositionMs: item.positionMs,
-            ),
-          ),
+      await openVodPlayer(
+        context,
+        app,
+        PlayerSession(
+          detail: detail,
+          site: site,
+          flag: item.flag,
+          episodeIndex: 0,
+          episodes: detail.episodeList(item.flag),
+          startPositionMs: item.positionMs,
         ),
       );
       return;
@@ -532,18 +540,16 @@ class _HistoryPageState extends State<HistoryPage> {
       return;
     }
     final index = item.episodeIndex.clamp(0, episodes.length - 1);
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => PlayerPage(
-          session: PlayerSession(
-            detail: freshDetail,
-            site: site,
-            flag: flag,
-            episodeIndex: index,
-            episodes: episodes,
-            startPositionMs: item.positionMs,
-          ),
-        ),
+    await openVodPlayer(
+      context,
+      app,
+      PlayerSession(
+        detail: freshDetail,
+        site: site,
+        flag: flag,
+        episodeIndex: index,
+        episodes: episodes,
+        startPositionMs: item.positionMs,
       ),
     );
   }

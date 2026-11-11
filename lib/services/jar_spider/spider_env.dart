@@ -19,6 +19,10 @@ import 'package:path/path.dart' as p;
 ///     JSON `{"cookie":…}`（quark / uc 另补 `nickname` / `member_type` 占位，否则该族判「未登录」）；
 ///  4. **fty Cloud-drive 通道**：`<数据目录>/tvfan/Cloud-drive.txt`（或源 ext 里
 ///     `Cloud-drive` 指向的 JSON 文件），键 `quarkCookie` / `ucCookie`——fty 系在 init 时读它。
+///  5. **TVBox 站点 Cookie 通道**：`<数据目录>/TVBox/{bili_cookie,115}.txt`（裸 cookie 串）。
+///     哔哩系蜘蛛的 ext 写的是 `cookie: http://127.0.0.1:9978/file/TVBox/bili_cookie.txt`，
+///     即由本地中继把该文件当 Cookie 读走；不写这个文件时蜘蛛拿到空 Cookie，
+///     只能取到 360P / 480P，部分稿件直接判未登录。
 ///
 /// 每次调用都重写（不再按签名跳过）：jar 可能自行清掉/改写这些文件，跳过写盘会让
 /// 「已登录」在常驻进程里变成「未配置」。
@@ -29,6 +33,9 @@ class SpiderEnv {
   static const _wexFiles = <String, String>{
     'quark': '.quarkcookie',
     'uc': '.ucpancookie',
+    // 115 属于同一族的「网盘直连」，文件名为约定俗成的 `.115cookie`；
+    // 不认识它的 jar 只会忽略这个文件，不会因此报错。
+    '115': '.115cookie',
   };
 
   /// wex SharedPreferences 键：provider → `Wex_*` 键名。
@@ -36,9 +43,20 @@ class SpiderEnv {
     'quark': 'Wex_quark_cookie',
     'uc': 'Wex_ucpan_cookie',
     'baidu': 'Wex_baidu_cookie',
+    '115': 'Wex_115_cookie',
   };
 
   static const _wexPrefsName = 'NewWexFnw_preferences';
+
+  /// TVBox 站点 Cookie 通道：provider → `<数据目录>/TVBox/<文件名>`。
+  ///
+  /// 哔哩这一条是实测口径：订阅里的 `csp_Bili` / `csp_BiliYS` 把 ext 的
+  /// `cookie` 直接写成这个中继地址，蜘蛛把响应体当 Cookie 用。
+  static const _siteCookieFiles = <String, String>{
+    'bili': 'bili_cookie.txt',
+    '115': '115.txt',
+  };
+
 
   /// Pizazz 通道：provider → 文件名。
   static const _pizazzFiles = <String, String>{
@@ -80,6 +98,7 @@ class SpiderEnv {
     await _guard(() => _syncWexSeed(spiderCacheDir, normalized, extra));
     await _guard(() => _syncPizazzFiles(tmpDir ?? Directory.systemTemp.path, normalized));
     if (dataDir != null && dataDir.trim().isNotEmpty) {
+      await _guard(() => _syncSiteCookieFiles(dataDir, normalized));
       await _guard(() => _syncCloudDrive(dataDir, normalized, ext));
     }
   }
@@ -129,6 +148,28 @@ class SpiderEnv {
     }
     file.parent.createSync(recursive: true);
     file.writeAsStringSync('${lines.join('\n')}\n', flush: true);
+  }
+
+  /// 通道 5：`<数据目录>/TVBox/{bili_cookie,115}.txt`（裸 cookie 串）。
+  ///
+  /// 哔哩系蜘蛛的 ext 直接写 `http://127.0.0.1:9978/file/TVBox/bili_cookie.txt`，
+  /// 由本地中继 `/file` 读走这段文本当 Cookie。
+  ///
+  /// **未配置时也要写成空文件**：文件缺失时中继回的是 404 + 正文「文件不存在」，
+  /// 蜘蛛不校验状态码，会把那段中文当成 Cookie 拼进请求头，反而连
+  /// 360P / 480P 都取不到。空文件才是「没有登录态」的正确表示。
+  static Future<void> _syncSiteCookieFiles(
+    String dataDir,
+    Map<String, String> cookies,
+  ) async {
+    final dir = Directory(p.join(dataDir, 'TVBox'));
+    dir.createSync(recursive: true);
+    _siteCookieFiles.forEach((provider, name) {
+      final file = File(p.join(dir.path, name));
+      // 解绑时必须原地清空：删文件会让中继回 404 + 中文正文，蜘蛛把那段正文
+      // 当 Cookie 拼进请求头，比「空 Cookie」更糟；换成旧 Cookie 更不行。
+      file.writeAsStringSync(cookies[provider] ?? '', flush: true);
+    });
   }
 
   /// 通道 3：`<java.io.tmpdir>/tvbox-ext/TVBox/*.txt`（JSON 对象，键 `cookie`）。

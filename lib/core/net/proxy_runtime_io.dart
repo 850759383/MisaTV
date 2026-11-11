@@ -3,7 +3,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import '../../services/artwork/tmdb_network.dart';
+import '../logging/app_log.dart';
 import 'proxy_config.dart';
+import 'system_proxy.dart';
 
 /// 全局代理运行时：本机 HTTP 代理桥 + 各客户端接入参数。
 ///
@@ -22,22 +25,121 @@ class ProxyRuntime {
   ProxyConfig config = const ProxyConfig();
   ProxyBridge? _bridge;
 
-  bool get enabled => config.valid && _bridge != null;
+  /// 真正在用的上游（手动配置，或从系统代理解析出来的那份）。
+  ProxyConfig? _effective;
+  Timer? _followRetry;
+  static const _followRetryInterval = Duration(seconds: 20);
+
+  bool get enabled => _bridge != null;
   int get bridgePort => _bridge?.port ?? 0;
-  String get summary => config.summary;
+
+  /// 当前是否在跟随系统代理（没有手动配置、且开了跟随）。
+  bool get followingSystem => !config.valid && config.followSystem;
+
+  /// 正在使用的上游描述：设置页直接显示这个，用户能看到「跟随系统代理 127.0.0.1:7897」。
+  String get summary {
+    final effective = _effective;
+    if (effective == null || !effective.valid) {
+      return config.followSystem ? '跟随系统代理（未发现可用代理）' : '直连';
+    }
+    final address =
+        '${effective.typeLabel} ${effective.host.trim()}:${effective.port}';
+    return config.valid ? address : '跟随系统代理 → $address';
+  }
+
+  /// 端口是否连得上（代理池里的公共节点大量失效，用前先探一下）。
+  Future<bool> isReachable(
+    String host,
+    int port, {
+    Duration timeout = const Duration(milliseconds: 800),
+  }) async {
+    Socket? socket;
+    try {
+      socket = await Socket.connect(host, port, timeout: timeout);
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      socket?.destroy();
+    }
+  }
 
   Future<void> apply(ProxyConfig next) async {
     config = next;
+    _followRetry?.cancel();
+    _followRetry = null;
+    await _restart();
+    // Clash / v2rayN 常常比本应用晚启动：先空跑，拿到系统代理后自动接上。
+    if (followingSystem && _bridge == null) {
+      _followRetry = Timer.periodic(_followRetryInterval, (_) {
+        unawaited(_restart());
+      });
+    }
+  }
+
+  Future<void> _restart() async {
+    final manual = config.valid ? config : null;
+    final resolved = manual ?? await _systemProxy();
+    // 上游没变就别重建桥：重建会换端口，正在跑的隧道/请求会被打断，
+    // 表现出来就是「封面偶尔加载不出来」这种随机失败。
+    final current = _effective;
+    if (_bridge != null &&
+        current != null &&
+        resolved != null &&
+        current.type == resolved.type &&
+        current.host == resolved.host &&
+        current.port == resolved.port &&
+        current.username == resolved.username &&
+        current.password == resolved.password) {
+      return;
+    }
     final old = _bridge;
     _bridge = null;
+    _effective = resolved;
     await old?.stop();
-    if (next.valid) {
+    if (resolved != null && resolved.valid) {
       try {
-        _bridge = await ProxyBridge.start(next);
+        _bridge = await ProxyBridge.start(resolved);
       } catch (_) {
         _bridge = null;
       }
     }
+    if (_bridge != null) {
+      _followRetry?.cancel();
+      _followRetry = null;
+    }
+    final upstreamLabel = resolved == null ? '无' : resolved.summary;
+    AppLog.i('proxy', '代理状态：$summary（上游=$upstreamLabel，桥端口=$bridgePort）');
+  }
+
+  /// 读系统代理：环境变量优先，其次 Windows 的「局域网设置」。
+  Future<ProxyConfig?> _systemProxy() async {
+    if (!config.followSystem) return null;
+    final fromEnv = SystemProxy.fromEnvironment(Platform.environment);
+    if (fromEnv != null) return fromEnv;
+    AppLog.i('proxy', '环境变量里没有代理，继续读 Windows 系统代理');
+    if (!Platform.isWindows) return null;
+    try {
+      const key =
+          r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings';
+      final enable = await _regValue(key, 'ProxyEnable');
+      final server = await _regValue(key, 'ProxyServer');
+      return SystemProxy.fromWindowsSettings(
+        proxyEnable: enable == '0x1' || enable == '1',
+        proxyServer: server,
+      );
+    } catch (_) {
+      // 读不到注册表就当没有系统代理
+      return null;
+    }
+  }
+
+  Future<String> _regValue(String key, String name) async {
+    final result = await Process.run('reg', ['query', key, '/v', name]);
+    final text = '${result.stdout}';
+    final match = RegExp(RegExp.escape(name) + r'\s+REG_\w+\s+(.+)')
+        .firstMatch(text);
+    return (match?.group(1) ?? '').trim();
   }
 
   static bool isLocalHost(String host) {
@@ -62,6 +164,40 @@ class ProxyRuntime {
     if (_overridesInstalled) return;
     _overridesInstalled = true;
     HttpOverrides.global = ProxyHttpOverrides();
+  }
+
+  /// 代理自检：给设置页一个「到底哪层坏了」的结论，而不是让用户猜。
+  Future<List<String>> diagnose() async {
+    final lines = <String>['当前状态：$summary'];
+    final upstream = _effective;
+    if (upstream == null || !upstream.valid) {
+      lines.add('没有可用代理：先在 Clash / v2rayN 打开「系统代理」，或在这里填手动代理。');
+    } else {
+      try {
+        final socket = await Socket.connect(
+          upstream.host,
+          upstream.port,
+          timeout: const Duration(seconds: 5),
+        );
+        socket.destroy();
+        lines.add('代理端口 ${upstream.host}:${upstream.port} 可连接 ✓');
+      } catch (_) {
+        lines.add('代理端口 ${upstream.host}:${upstream.port} 连不上 ✗（代理没启动或端口不对）');
+      }
+    }
+    try {
+      final resolved = await InternetAddress.lookup('api.themoviedb.org')
+          .timeout(const Duration(seconds: 5));
+      lines.add(
+        describeTmdbDns(
+          addresses: [for (final item in resolved) item.address],
+          proxyActive: _bridge != null,
+        ),
+      );
+    } catch (_) {
+      lines.add('api.themoviedb.org 解析失败（当前 DNS 不可用）。');
+    }
+    return lines;
   }
 
   List<String> get jvmProps {
@@ -93,8 +229,11 @@ class ProxyRuntime {
   }
 
   Future<void> shutdown() async {
+    _followRetry?.cancel();
+    _followRetry = null;
     final old = _bridge;
     _bridge = null;
+    _effective = null;
     await old?.stop();
   }
 }
@@ -221,8 +360,32 @@ class ProxyBridge {
   }
 
   void _tunnel(Socket client, _SocketReader clientReader, _Upstream upstream) {
-    unawaited(clientReader.pipeTo(upstream.socket));
-    unawaited(upstream.reader.pipeTo(client));
+    var finished = 0;
+    void closeAll() {
+      try {
+        client.destroy();
+      } catch (_) {}
+      try {
+        upstream.socket.destroy();
+      } catch (_) {}
+    }
+
+    void onDirectionDone() {
+      finished++;
+      if (finished >= 2) closeAll();
+    }
+
+    // 两个方向各自泵数据，任一侧先结束都不动另一侧（见 pipeTo 的注释）。
+    unawaited(
+      clientReader
+          .pipeTo(upstream.socket, closeDestination: false)
+          .whenComplete(onDirectionDone),
+    );
+    unawaited(
+      upstream.reader
+          .pipeTo(client, closeDestination: false)
+          .whenComplete(onDirectionDone),
+    );
   }
 
   Future<_Upstream?> _connectTunnel(String host, int port) async {
@@ -702,8 +865,16 @@ class _SocketReader {
     return Uint8List.fromList(out);
   }
 
-  /// 把缓冲区和后续字节写给对端；本端关闭时关闭对端。
-  Future<void> pipeTo(Socket destination) async {
+  /// 把缓冲区和后续字节写给对端。
+  ///
+  /// [closeDestination] 只在**普通转发**时为 true；隧道里必须传 false ——
+  /// Dart 的 `Socket.close()` 是整条连接一起关（没有 half-close），
+  /// 上传方向读完就关会顺手把下载方向掐断，表现就是服务端/客户端侧的
+  /// 「Connection closed before full header」「handshake terminated」这类随机失败。
+  Future<void> pipeTo(
+    Socket destination, {
+    bool closeDestination = true,
+  }) async {
     if (_buffer.isNotEmpty) {
       destination.add(Uint8List.fromList(_buffer));
       _buffer.clear();
@@ -725,7 +896,7 @@ class _SocketReader {
       try {
         destination.destroy();
       } catch (_) {}
-    } else {
+    } else if (closeDestination) {
       try {
         await destination.close();
       } catch (_) {}

@@ -87,6 +87,29 @@ void main() {
     });
   });
 
+  group('looksLikeBiliFlag', () {
+    test('B 站线路的各种写法都能认出', () {
+      expect(looksLikeBiliFlag('B站'), isTrue);
+      expect(looksLikeBiliFlag('B 站 1080P'), isTrue);
+      expect(looksLikeBiliFlag('哔哩哔哩'), isTrue);
+      expect(looksLikeBiliFlag('bilibili'), isTrue);
+      expect(looksLikeBiliFlag('Bili 4K'), isTrue);
+    });
+
+    test('普通线路名不误判', () {
+      expect(looksLikeBiliFlag('4K'), isFalse);
+      expect(looksLikeBiliFlag('高清线路'), isFalse);
+      expect(looksLikeBiliFlag('UC'), isFalse);
+      expect(looksLikeBiliFlag(''), isFalse);
+    });
+
+    test('蜘蛛的「账号未登录」文案能定位到哔哩', () {
+      // 这类文案不含网盘名，必须靠线路名兜底才会触发会话刷新重试。
+      expect(looksLikeBiliFlag('获取失败：账号未登录或 Cookie 已失效'), isFalse);
+      expect(looksLikeBiliFlag('B站'), isTrue);
+    });
+  });
+
   group('hostProxyPortOf', () {
     test('解析 SpiderHost 上报的实际端口', () {
       expect(hostProxyPortOf('[host-proxy] listening port=20123'), 20123);

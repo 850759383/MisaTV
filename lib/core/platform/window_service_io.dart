@@ -6,8 +6,12 @@ import 'package:flutter/material.dart';
 import 'package:screen_retriever/screen_retriever.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../logging/app_log.dart';
+import 'video_window_fit.dart';
+
 /// 桌面自绘标题栏仅在 Windows 启用（其余桌面保留系统窗口装饰）。
 final bool hasCustomWindowChrome = Platform.isWindows;
+
 
 /// 关窗时（自绘按钮 / 系统 X / Alt+F4）先跑这里注册的清理，再结束进程。
 Future<void> Function()? _shutdownHook;
@@ -99,8 +103,7 @@ Future<Size?> currentAppWindowSize() async {
 Future<Size> _defaultWindowSize() async {
   const base = Size(1280, 820);
   try {
-    final display = await screenRetriever.getPrimaryDisplay();
-    final work = display.visibleSize ?? display.size;
+    final work = await _workAreaSize();
     if (work.width <= 0 || work.height <= 0) return base;
     final width = (work.width * 0.5).clamp(_minWindowWidth, 1920.0).toDouble();
     final maxHeight = work.height * 0.9;
@@ -119,8 +122,7 @@ Future<Size> _defaultWindowSize() async {
 Future<Size> _startupWindowSize(Size? remembered) async {
   if (remembered == null) return _defaultWindowSize();
   try {
-    final display = await screenRetriever.getPrimaryDisplay();
-    final work = display.visibleSize ?? display.size;
+    final work = await _workAreaSize();
     if (work.width > 0 && work.height > 0) {
       return Size(
         remembered.width
@@ -303,6 +305,12 @@ Widget windowDragArea(Widget child, {bool enabled = true}) {
   );
 }
 
+/// 本窗口的常规最小尺寸：主窗口 920×620，独立播放器窗口更小（见调用方）。
+Size _windowMinimumSize = const Size(_minWindowWidth, _minWindowHeight);
+
+/// 登记本窗口的常规最小尺寸；迷你小窗退出后按它还原。
+void setAppWindowMinimumSize(Size size) => _windowMinimumSize = size;
+
 Size? _miniRestoreSize;
 Offset? _miniRestorePosition;
 bool _miniRestoreMaximized = false;
@@ -316,10 +324,16 @@ Future<void> enterMiniPlayerWindow() async {
     _miniRestoreMaximized = await windowManager.isMaximized();
     _miniRestoreSize = await windowManager.getSize();
     _miniRestorePosition = await windowManager.getPosition();
+
     if (_miniRestoreMaximized) await windowManager.unmaximize();
     await windowManager.setMinimumSize(const Size(280, 160));
     await windowManager.setAlwaysOnTop(true);
-    await windowManager.setSize(const Size(480, 292));
+    // 竖版视频的小窗也竖着放，否则小窗里全是黑边。
+    await windowManager.setSize(
+      _videoAspect > 0 && _videoAspect < 1
+          ? const Size(292, 480)
+          : const Size(480, 292),
+    );
     await windowManager.center();
   } catch (_) {
     _miniActive = false;
@@ -337,7 +351,7 @@ Future<void> exitMiniPlayerWindow() async {
     if (_miniRestorePosition != null) {
       await windowManager.setPosition(_miniRestorePosition!);
     }
-    await windowManager.setMinimumSize(const Size(920, 620));
+    await windowManager.setMinimumSize(_windowMinimumSize);
     if (_miniRestoreMaximized) await windowManager.maximize();
   } catch (_) {
     // 恢复失败也不阻断播放
@@ -373,5 +387,76 @@ Future<void> setWindowFullscreen(bool fullscreen) async {
     final restore = windowManager.setAsFrameless();
     await exit;
     await restore;
+  }
+}
+
+double _videoAspect = 0;
+Size? _videoRestoreSize;
+Offset? _videoRestorePosition;
+Size? _videoRestoreMinimum;
+
+/// 主屏工作区（与 window_manager 的尺寸接口同一套单位，Windows 上是物理像素）。
+Future<Size> _workAreaSize() async {
+  try {
+    final display = await screenRetriever.getPrimaryDisplay();
+    final work = display.visibleSize ?? display.size;
+    if (work.width > 0 && work.height > 0) return work;
+  } catch (_) {
+    // 拿不到显示器信息时退回 2K 基准
+  }
+  return const Size(1280, 720);
+}
+
+/// 独立播放器窗口按视频分辨率切横 / 竖版。
+///
+/// 只在分辨率真的变了才动手：同一段视频里用户自己拖过的尺寸不会被反复覆盖。
+/// 竖版视频把窗口压成视频比例并居中，同时记住切换前的几何；回到横版视频时还原，
+/// 用户手动摆的位置也不会丢。
+Future<void> fitAppWindowToVideo(double videoWidth, double videoHeight) async {
+  if (!_isDesktopWindow) return;
+  final aspect = videoAspectOf(videoWidth, videoHeight);
+  if (aspect <= 0 || (aspect - _videoAspect).abs() < 0.02) return;
+  _videoAspect = aspect;
+  try {
+    if (await windowManager.isFullScreen()) return;
+    if (aspect < 1) {
+      if (_videoRestoreSize == null) {
+        _videoRestoreSize = await windowManager.getSize();
+        _videoRestorePosition = await windowManager.getPosition();
+        _videoRestoreMinimum = _windowMinimumSize;
+      }
+      final size = windowSizeForVideo(
+        videoWidth,
+        videoHeight,
+        await _workAreaSize(),
+      );
+      _windowMinimumSize = portraitWindowMinimum(videoWidth, videoHeight);
+      await windowManager.setMinimumSize(_windowMinimumSize);
+      await windowManager.setSize(size);
+      await windowManager.center();
+      AppLog.i(
+        'window',
+        '竖版视频 ${videoWidth.round()}x${videoHeight.round()} → '
+            '窗口 ${size.width.round()}x${size.height.round()}',
+      );
+      return;
+    }
+    // 横版：只还原被我们改成竖版的窗口，用户自己拖出来的尺寸不动。
+    final restore = _videoRestoreSize;
+    if (restore == null) return;
+    final position = _videoRestorePosition;
+    final minimum = _videoRestoreMinimum;
+    _videoRestoreSize = null;
+    _videoRestorePosition = null;
+    _videoRestoreMinimum = null;
+    if (minimum != null) {
+      _windowMinimumSize = minimum;
+      await windowManager.setMinimumSize(minimum);
+    }
+    await windowManager.setSize(restore);
+    if (position != null) await windowManager.setPosition(position);
+    AppLog.i('window', '横版视频 → 窗口还原 ${restore.width.round()}x${restore.height.round()}');
+  } catch (e, s) {
+    AppLog.w('window', '按视频比例调整窗口失败', e, s);
   }
 }
