@@ -6,6 +6,10 @@ const Map<String, List<String>> driveAuthCookieNames = {
   'quark': ['__puus', '__pus', '__puuk', '__pusd'],
   'uc': ['PUVID', '__puus', '__pus', 'drive_uc'],
   'baidu': ['BDUSS'],
+  // 115 的网盘接口靠 UID + CID + SEID 三件套鉴权，任一缺失都会被判未登录。
+  '115': ['UID', 'CID', 'SEID'],
+  // 哔哩哔哩只认 SESSDATA；没有它也能播 360P / 480P，有它才能拿高清与大会员画质。
+  'bili': ['SESSDATA'],
 };
 
 /// Cookie 应该来自的域名，用于输入提示。
@@ -13,7 +17,26 @@ const Map<String, String> driveCookieDomains = {
   'quark': 'pan.quark.cn',
   'uc': 'drive.uc.cn',
   'baidu': 'pan.baidu.com',
+  '115': '115.com',
+  'bili': 'bilibili.com',
 };
+
+/// 除登录态字段外还必须齐全的 Cookie（缺了会被服务端判成半个会话）。
+///
+/// 115 是「三件套」：只有 UID 没有 CID / SEID 时 `api.115.com` 直接回
+/// 「登录失败」，蜘蛛侧表现为播放地址为空。
+const Map<String, List<String>> driveRequiredCookieNames = {
+  '115': ['UID', 'CID', 'SEID'],
+};
+
+/// 该 Cookie 是否已具备完整会话（登录态字段 + 必需字段）。
+bool driveCookieIsComplete(String provider, String cookie) {
+  if (!driveCookieHasAuth(provider, cookie)) return false;
+  final required = driveRequiredCookieNames[provider] ?? const [];
+  if (required.isEmpty) return true;
+  final names = driveCookieNames(cookie);
+  return required.every(names.contains);
+}
 
 const Set<String> _cookieAttributes = {
   'path',
@@ -87,6 +110,11 @@ bool driveCookieHasAuth(String provider, String cookie) {
 String driveCookieMissingHint(String provider) {
   final names = driveAuthCookieNames[provider] ?? const [];
   if (names.isEmpty) return 'Cookie 为空';
+  final required = driveRequiredCookieNames[provider] ?? const [];
+  if (required.length > 1) {
+    return 'Cookie 里没有找到完整的登录态字段（需要同时包含 '
+        '${required.join(' / ')}），请确认复制的是已登录状态下的完整 Cookie';
+  }
   return 'Cookie 里没有找到登录态字段（${names.join(' / ')}），'
       '请确认复制的是已登录状态下的完整 Cookie';
 }

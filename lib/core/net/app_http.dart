@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 
 import '../logging/app_log.dart';
 import '../logging/log_redact.dart';
+import '../../services/relay/proxy_rules.dart';
 import 'doh_client.dart';
 import 'url_utils.dart';
 
@@ -101,13 +102,23 @@ class AppHttp {
     }
   }
 
+  /// 订阅代理规则：命中的地址改走本机中继的通用代理口（TVBox `rules[].hosts`）。
+  ///
+  /// 只覆盖走 AppHttp 的请求（CMS / 蜘蛛的 Dart 侧 / 封面 / 字幕接口等）；
+  /// JVM 里的 jar 蜘蛛自带 OkHttp，走的是应用设置里的系统代理。
+  String _proxyRouted(String url, {Map<String, String>? headers}) {
+    final rules = ProxyRules.current;
+    if (rules.isEmpty || !rules.matches(url)) return url;
+    return rules.rewrite(url, headers: headers);
+  }
+
   Future<HttpResponseText> _getTextOnce(
     String url, {
     Map<String, String>? headers,
     Duration timeout = const Duration(seconds: 15),
     bool useDoh = false,
   }) async {
-    final normalized = normalizeHostUrl(url);
+    final normalized = _proxyRouted(normalizeHostUrl(url), headers: headers);
     final uri = Uri.tryParse(normalized);
     if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) {
       throw AppHttpException('无效的地址：$url');
@@ -137,8 +148,10 @@ class AppHttp {
     } on AppHttpException {
       rethrow;
     } catch (e) {
-      AppLog.w('http', 'GET ${redactUrl(normalized)} 失败', e);
-      throw AppHttpException('网络请求失败：$e');
+      // 异常文本里可能带完整 URL（含 ?api_key=…），落盘前先给 query 值打码。
+      final detail = redactQueryValues(e.toString());
+      AppLog.w('http', 'GET ${redactUrl(normalized)} 失败', detail);
+      throw AppHttpException('网络请求失败：$detail');
     }
   }
 
@@ -156,7 +169,7 @@ class AppHttp {
     int maxBytes = 32 << 10,
     bool useDoh = false,
   }) async {
-    final normalized = normalizeHostUrl(url);
+    final normalized = _proxyRouted(normalizeHostUrl(url), headers: headers);
     final uri = Uri.tryParse(normalized);
     if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) {
       return null;
@@ -212,7 +225,7 @@ class AppHttp {
     Map<String, String>? headers,
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    final normalized = normalizeHostUrl(url);
+    final normalized = _proxyRouted(normalizeHostUrl(url), headers: headers);
     final uri = Uri.tryParse(normalized);
     if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) {
       throw AppHttpException('无效的地址：$url');
@@ -251,8 +264,9 @@ class AppHttp {
     } on AppHttpException {
       rethrow;
     } catch (e) {
-      AppLog.w('http', 'POST ${redactUrl(normalized)} 失败', e);
-      throw AppHttpException('网络请求失败：$e');
+      final detail = redactQueryValues(e.toString());
+      AppLog.w('http', 'POST ${redactUrl(normalized)} 失败', detail);
+      throw AppHttpException('网络请求失败：$detail');
     }
   }
 
@@ -263,7 +277,7 @@ class AppHttp {
     Map<String, String>? headers,
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    final normalized = normalizeHostUrl(url);
+    final normalized = _proxyRouted(normalizeHostUrl(url), headers: headers);
     final uri = Uri.tryParse(normalized);
     if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) {
       throw AppHttpException('无效的地址：$url');
@@ -302,8 +316,9 @@ class AppHttp {
     } on AppHttpException {
       rethrow;
     } catch (e) {
-      AppLog.w('http', 'POST ${redactUrl(normalized)} 失败', e);
-      throw AppHttpException('网络请求失败：$e');
+      final detail = redactQueryValues(e.toString());
+      AppLog.w('http', 'POST ${redactUrl(normalized)} 失败', detail);
+      throw AppHttpException('网络请求失败：$detail');
     }
   }
 

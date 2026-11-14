@@ -11,11 +11,12 @@ import '../local_store.dart';
 
 /// 免费代理池：每天自动拉一次列表，支持手动刷新、手动添加、测速与切换。
 ///
-/// 选中某个节点后走 [applyProxy]（即 `AppState.setProxy`），把单条节点套进
-/// 现有的内置代理桥；取消选中就是直连。这样 HTTP / SOCKS5 的转发逻辑
-/// 一份都不用改。
+/// 选中节点**只记录选择**，由 [onSelectionChanged] 通知 AppState 统一决策；
+/// 这里绝不直接改「网络代理」设置——两处都写 `ProxyConfig` 会互相覆盖：
+/// 选过代理池节点后，下次启动 restore 会把用户自己设的代理（比如「跟随系统
+/// 代理」的 Clash）悄悄换成一个来路不明的公共节点，表现就是「有时能用有时全超时」。
 class ProxyPoolService extends ChangeNotifier {
-  ProxyPoolService({required this.store, required this.applyProxy});
+  ProxyPoolService({required this.store, required this.onSelectionChanged});
 
   static const sourceUrl =
       'https://raw.githubusercontent.com/watchttvv/free-proxy-list/refs/heads/main/proxy.txt';
@@ -27,7 +28,9 @@ class ProxyPoolService extends ChangeNotifier {
   static const maxNodes = 120;
 
   final LocalStore store;
-  final Future<void> Function(ProxyConfig config) applyProxy;
+
+  /// 选择变化后让 AppState 重新算「到底走哪个代理」。
+  final Future<void> Function() onSelectionChanged;
 
   List<ProxyNode> nodes = const [];
   String selectedId = '';
@@ -72,13 +75,6 @@ class ProxyPoolService extends ChangeNotifier {
     }
   }
 
-  /// 启动时把上次选中的节点重新套进代理桥（不重新落盘）。
-  Future<void> restoreSelection() async {
-    final node = selected;
-    if (node == null) return;
-    await applyProxy(_configOf(node));
-  }
-
   Future<void> autoRefreshIfDue() async {
     if (!due || refreshing) return;
     await refresh();
@@ -120,7 +116,7 @@ class ProxyPoolService extends ChangeNotifier {
       // 选中的自动节点在新列表里消失了：退回直连，避免代理指向死地址。
       if (selectedId.isNotEmpty && selected == null) {
         selectedId = '';
-        await applyProxy(const ProxyConfig(enabled: false));
+        await onSelectionChanged();
       }
       await _save();
       AppLog.i('proxy', '代理池已更新：${nodes.length} 个节点');
@@ -186,15 +182,15 @@ class ProxyPoolService extends ChangeNotifier {
     if (node == null) return;
     selectedId = node.id;
     await _save();
-    await applyProxy(_configOf(node));
+    await onSelectionChanged();
     notifyListeners();
   }
 
-  /// 取消代理，恢复直连。
+  /// 取消代理池节点：回到用户自己的「网络代理」设置（手填代理或跟随系统）。
   Future<void> selectDirect() async {
     selectedId = '';
     await _save();
-    await applyProxy(const ProxyConfig(enabled: false));
+    await onSelectionChanged();
     notifyListeners();
   }
 
@@ -231,7 +227,7 @@ class ProxyPoolService extends ChangeNotifier {
     nodes = nodes.where((node) => node.id != id).toList();
     if (selectedId == id) {
       selectedId = '';
-      await applyProxy(const ProxyConfig(enabled: false));
+      await onSelectionChanged();
     }
     await _save();
     notifyListeners();
@@ -255,7 +251,8 @@ class ProxyPoolService extends ChangeNotifier {
     }
   }
 
-  ProxyConfig _configOf(ProxyNode node) => ProxyConfig(
+  /// 代理池节点转成代理桥配置（只在 AppState 里用）。
+  static ProxyConfig configOf(ProxyNode node) => ProxyConfig(
     enabled: true,
     type: node.type,
     host: node.host,

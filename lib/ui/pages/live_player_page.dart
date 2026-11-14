@@ -36,6 +36,7 @@ class LivePlayerPage extends StatefulWidget {
     this.groups = const [],
     this.epgEntries = const {},
     this.initialGroup = '',
+    this.onExit,
   });
 
   final LiveBean bean;
@@ -51,6 +52,9 @@ class LivePlayerPage extends StatefulWidget {
 
   /// 打开播放器时所在的分组名，换台菜单默认停在这一组。
   final String initialGroup;
+
+  /// 独立窗口模式下退出播放器（关闭子窗口）；为空 = 普通路由返回。
+  final Future<void> Function()? onExit;
 
   @override
   State<LivePlayerPage> createState() => _LivePlayerPageState();
@@ -666,10 +670,12 @@ class _LivePlayerPageState extends State<LivePlayerPage>
     if (mounted) _toast(next ? '窗口已置顶（仅本次播放生效）' : '已取消窗口置顶');
   }
 
-  Future<void> _toggleMini() async {
-    if (!_isDesktop) return;
-    if (_fullscreen) await _toggleFullscreen();
-    final next = !_mini;
+  Future<void> _toggleMini() => _setMini(!_mini);
+
+  /// 展开 / 收起小窗；[announce] 只在用户手动切换时提示。
+  Future<void> _setMini(bool next, {bool announce = true}) async {
+    if (!_isDesktop || next == _mini) return;
+    if (next && _fullscreen) await _toggleFullscreen();
     if (next) {
       _pinnedBeforeMini = _alwaysOnTop;
       await enterMiniPlayerWindow();
@@ -689,8 +695,19 @@ class _LivePlayerPageState extends State<LivePlayerPage>
     });
     // exitMiniPlayerWindow 会把置顶关掉，这里恢复退出小窗后的选择。
     if (!next) await setAppWindowAlwaysOnTop(_alwaysOnTop);
-    if (next) _toast('小窗模式：窗口已置顶，点画面显示控制');
+    if (next && announce) _toast('小窗模式：窗口已置顶，点画面显示控制');
   }
+
+  Future<void> _exitPage() async {
+    final exit = widget.onExit;
+    if (exit != null) {
+      await exit();
+      return;
+    }
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  void _requestExit() => unawaited(_exitPage());
 
   void _toast(String message) {
     if (!mounted) return;
@@ -742,7 +759,7 @@ class _LivePlayerPageState extends State<LivePlayerPage>
       if (_fullscreen) {
         unawaited(_toggleFullscreen());
       } else {
-        Navigator.of(context).maybePop();
+        _requestExit();
       }
       return KeyEventResult.handled;
     }
@@ -877,8 +894,7 @@ class _LivePlayerPageState extends State<LivePlayerPage>
                                     const SizedBox(width: 8),
                                   ],
                                   TextButton(
-                                    onPressed: () =>
-                                        Navigator.of(context).maybePop(),
+                                    onPressed: _requestExit,
                                     child: const Text('返回'),
                                   ),
                                   const SizedBox(width: 8),
@@ -925,8 +941,7 @@ class _LivePlayerPageState extends State<LivePlayerPage>
                                   Row(
                                     children: [
                                       IconButton(
-                                        onPressed: () =>
-                                            Navigator.of(context).pop(),
+                                        onPressed: _requestExit,
                                         icon: const Icon(
                                           Icons.arrow_back_rounded,
                                           color: Colors.white,

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../app.dart';
 import '../models/site_config.dart';
 import '../models/vod.dart';
+import 'open_player.dart';
 import 'pages/player_page.dart';
 
 /// 用内置播放器打开一组「外来直链」（WebDAV 目录里的文件 / 磁力流等）。
@@ -27,19 +29,18 @@ Future<void> openRawPlayback(
     sourceKey: sourceKey,
   );
   final site = SourceBean(key: sourceKey, name: subtitle, type: 0, api: '');
-  await Navigator.of(context).push(
-    MaterialPageRoute(
-      builder: (_) => PlayerPage(
-        session: PlayerSession(
-          detail: detail,
-          site: site,
-          flag: flag,
-          episodeIndex: index,
-          episodes: episodes,
-          initialPlay: PlayResult(url: episodes[index].url),
-          ephemeral: true,
-        ),
-      ),
+  final app = AppScope.of(context);
+  await openVodPlayer(
+    context,
+    app,
+    PlayerSession(
+      detail: detail,
+      site: site,
+      flag: flag,
+      episodeIndex: index,
+      episodes: episodes,
+      initialPlay: PlayResult(url: episodes[index].url),
+      ephemeral: true,
     ),
   );
 }

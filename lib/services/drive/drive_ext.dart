@@ -21,10 +21,45 @@ String enrichSpiderExt(String ext, Map<String, String> tokens) {
       changed = true;
     }
     if (_normalizeCloudDrive(decoded)) changed = true;
+    if (_ensureBiliCookieUrl(decoded, tokens)) changed = true;
     return changed ? jsonEncode(decoded) : ext;
   } catch (_) {
     return ext;
   }
+}
+
+/// 哔哩系蜘蛛（`csp_Bili` / `csp_BiliYS`）的 ext 用 `cookie` 指向一个**文本文件**
+/// （订阅里通常写死 `http://127.0.0.1:9978/file/TVBox/bili_cookie.txt`）。
+///
+/// 这里做两件事：
+///   1. 把写死的 9978 换成中继的真实端口（端口被占用时会换临时端口）；
+///   2. 源没写 `cookie` 但本机配了哔哩 Cookie 时，补上这个地址，
+///      让蜘蛛能读到登录态而不是空串。
+bool _ensureBiliCookieUrl(Map decoded, Map<String, String> tokens) {
+  final relay = LocalRelay.instance;
+  if (!relay.running) return false;
+  final fileUrl = '${relay.baseUrl}/file/TVBox/bili_cookie.txt';
+  final raw = '${decoded['cookie'] ?? ''}'.trim();
+  if (raw.isEmpty) {
+    if ((tokens['bili'] ?? '').trim().isEmpty) return false;
+    decoded['cookie'] = fileUrl;
+    return true;
+  }
+  final rewritten = _relayFileUrl(raw, relay.baseUrl);
+  if (rewritten == null || rewritten == raw) return false;
+  decoded['cookie'] = rewritten;
+  return true;
+}
+
+/// 把 `http://127.0.0.1:<任意端口>/file/...` 对齐到当前中继端口。
+String? _relayFileUrl(String raw, String baseUrl) {
+  final match = RegExp(
+    r'^https?://(?:127\.0\.0\.1|localhost):\d+(/file/.*)$',
+    caseSensitive: false,
+  ).firstMatch(raw);
+  final tail = match?.group(1);
+  if (tail == null) return null;
+  return '$baseUrl$tail';
 }
 
 /// `Cloud-drive: "tvfan/Cloud-drive.txt"` → `http://127.0.0.1:<relay>/file/tvfan/Cloud-drive.txt`。

@@ -35,6 +35,7 @@ AppState ──> SourceService ──> CmsSource      (type 0 / 1 / 4，MoviePar
 | `/file` `/pkg` | 中继应用数据目录内的本地文件（本地包源、字幕、封面） |
 | `/img` | 图片兜底中继，补豆瓣要求的 `Referer` |
 | `/bt/<infohash>/<index>` | 磁力 Range 取流 + piece 门控（512KB 一片） |
+| `/ext/<token>/<index>` | 第三方播放器选集：按需解析后 302 到真实播放地址 |
 | `/proxy` `/proxy/<port>` | 直播代理；壳内路由（如 `do=hmys`）原样转发给常驻取流 JVM |
 
 两个必须遵守的约束：
@@ -45,6 +46,52 @@ AppState ──> SourceService ──> CmsSource      (type 0 / 1 / 4，MoviePar
 2. **加固壳播放必须让 JVM 常驻**（`SpiderHost --hold`）。壳返回的播放地址指向该 JVM 自己的
    `127.0.0.1:<port>`，一次性进程退出后地址立即失效。
 
+## 独立播放器窗口
+
+设置 → 播放 → 「内置播放器独立窗口」打开后，点播 / 直播不在主界面里压路由，而是用
+`desktop_multi_window` 另起一个窗口播放，主界面保持原样可见。**沉浸观影模式下强制不生效**：
+判定只看 `PlayerSettings.effectivePopOutPlayer`（`popOutPlayer && !immersiveMode`），
+设置本身保留，退出沉浸后自动恢复。
+
+| 环节 | 实现 |
+| --- | --- |
+| 判定 | `ui/open_player.dart` 的 `shouldUseStandalonePlayer`：Windows + `effectivePopOutPlayer`；窗口创建失败回落到内嵌播放器，不能点了没反应 |
+| 传参 | `services/player/player_window_session.dart` 把详情 / 线路 / 选集 / 首播地址序列化成一个 JSON 文件，文件路径作为窗口 `arguments`（`misa-player:` 前缀） |
+| 子窗口启动 | `main.dart` 先按 `multi_window <id> <arg>` 入口参数分流；`player_window_io.dart` 重建一套 AppState / 服务 / 中继（9978 被主窗口占用时换临时端口）后只渲染播放器页 |
+| 原生 | `windows/runner/flutter_window.cpp` 在 `DesktopMultiWindowSetWindowCreatedCallback` 里给子引擎注册插件，缺这步子窗口里 fvp / window_manager 都不可用 |
+| 回写 | 子窗口写 shared_preferences 后给主窗口发 `closed` / `search`；主窗口 `AppState.reloadUserDataFromStore` 先让 `PortablePrefsStore` 的缓存失效再重读，否则看到的还是旧进度 |
+
+子窗口和主窗口一样是**无边框**的：播放器页自带顶栏（标题 + 返回 + 画面控制），那一行本来就是
+拖拽区（`windowDragArea`），边缘缩放由 `windowFrame` 的 Flutter 边缘层接管，所以不要再给子窗口
+挂系统标题栏（会白占一行高度，还多出一套和播放器顶栏重复的按钮）。全屏因此也走主窗口同一套
+「`setTitleBarStyle(hidden)` + `setFullScreen` → 退出时 `setAsFrameless`」补丁。
+
+### 竖版视频的窗口形态
+
+独立窗口播放时，播放器页拿到视频分辨率后回调 `fitAppWindowToVideo`（`core/platform/window_service_io.dart`）：
+竖版视频（高 > 宽）把窗口按视频比例压成竖版并居中，最小尺寸同步换成 `320 × (320/比例)`；
+横版视频再把记住的原尺寸/位置还原。只有**视频分辨率变化**才动手，所以同一段视频里用户自己拖出来的尺寸不会被反复覆盖。
+尺寸换算靠 `_workAreaSize()`：`screen_retriever` 的 `visibleSize` 与 `window_manager` 的尺寸接口是同一套逻辑像素，
+不要再自己乘除 DPI（多除一次会让窗口缩成巴掌大）。小窗模式也按当前视频的横竖来摆。
+
+### 冒烟测试独立窗口
+
+`flutter build windows --release --dart-define=MISA_TEST_POPOUT=<视频地址或本地 file://>`：
+启动 2 秒后自动弹一个独立播放器窗口，用来验证多窗口链路（子引擎插件注册、载荷解析、窗口形态）。
+正式构建不带这个 define，`String.fromEnvironment` 取到空串，整段被摇掉，运行时零成本。
+
+## 订阅代理规则（`rules[].hosts`）
+
+TVBox 的代理规则：`rules[].hosts` 列出「要由应用代理出去」的域名（支持 `.*workers.dev`
+这类正则，非法的正则退回普通包含匹配）。订阅加载时 `AppState._setConfig` 把规则登记到
+`services/relay/proxy_rules.dart` 的 `ProxyRules.current`；`AppHttp` 命中后把地址改写成
+本机中继 `/proxy?do=proxy&url=…`（额外请求头走 `h=`），由中继带着应用自己的代理设置去取。
+中继没起来时规则自动失效，退化为直连。
+
+覆盖范围：所有走 `AppHttp` 的请求（CMS、Dart 侧蜘蛛、封面、字幕接口…）。**不覆盖**
+JVM 里的 jar 蜘蛛（自带 OkHttp）与 JS 蜘蛛的 curl 子进程——这两层吃的是系统代理
+（`-Dhttp.proxyHost` / 环境变量），桌面端开着全局代理时行为一致。
+
 ## 蜘蛛运行时
 
 | 类型 | 实现要点 |
@@ -54,8 +101,29 @@ AppState ──> SourceService ──> CmsSource      (type 0 / 1 / 4，MoviePar
 | `jar` / DEX | 下载 jar → 若含 `classes.dex` 用 dex2jar 转换 → 反射调用 `stubs.jar` 里的 `SpiderRunner`；dex2jar 对 R8「去掉构造器」的 `NEW` 误译由 `DexJarRepair` 修正 |
 | 加固壳 | 首次用 unidbg ARM 桥解包，缓存到 `jvm_cache/payloads/<jar>/`；之后用 shell-shim（纯 Java 影子 `DexNative`）加载缓存，不再启动模拟器 |
 
-jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘到四个位置
-（`.quarkcookie`、prefs 种子、Pixazz、`Cloud-drive.txt`），缺一个就会显示「还没有配置夸克 Cookie」。
+jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘到固定位置
+（`.quarkcookie`、prefs 种子、Pizazz、`Cloud-drive.txt`、`TVBox/*.txt`），缺一个就会显示「还没有配置夸克 Cookie」。
+
+## 网盘 / 站点凭据（`driveAccounts`）
+
+五家凭据统一存在 `kniephos.driveAccounts`，`AppState._syncDriveTokens` 把 Cookie 注入
+`driveTokens`（provider 名即蜘蛛 `ext` 键名），`SpiderEnv.sync` 再落盘成各蜘蛛家族期望的文件：
+
+| provider | 登录方式 | 落盘通道 | 缺凭据的后果 |
+| --- | --- | --- | --- |
+| `quark` / `uc` / `baidu` | 网页扫码（WebView2） | 四条通道全写 | 蜘蛛报「还没有配置 XX Cookie」，取不到流 |
+| `115` | 手动粘贴 `UID` / `CID` / `SEID` | `.115cookie`、`Wex_115_cookie` 种子、`TVBox/115.txt` | `api.115.com` 判登录失败，播放地址为空 |
+| `bili` | 手动粘贴 `SESSDATA` | 仅 `TVBox/bili_cookie.txt`（订阅里 `cookie` 就指向这个中继地址） | **仍可播 360P / 480P**，只是没有高清 / 大会员画质 |
+
+三条容易踩的约束：
+
+1. **`bili` 是可选增强**（`AppState.isOptionalDriveProvider`）。它不能弹登录窗、不能拦播放、
+   不能因为 `guest` 标记就被 `_syncDriveTokens` 丢掉 —— 没 Cookie 也能取到低画质 `durl`，
+   B 站 CDN 只要求 Referer（中继的 `/play` 已经补了 `https://www.bilibili.com/`）。
+2. **`TVBox/*.txt` 解绑时写空文件**，不能删：中继对缺失文件回 404 + 正文「文件不存在」，
+   蜘蛛不校验状态码，会把那段中文当 Cookie 拼进请求头，比空 Cookie 更糟。
+3. **`115` 与 `quark` / `uc` / `baidu` 一样是硬门槛**：确认访客态后要从 `driveTokens` 里过滤掉，
+   否则蜘蛛拿半个会话去取流只回空数据。
 
 ## 设置页折叠规范
 
@@ -64,6 +132,29 @@ jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘�
 
 新增父分类时照此办理，不要留常驻展开的区块：设置页是长列表，任何一块展开都会把其他分类挤出屏幕。
 没有合适摘要时至少保留 `trailing` 的计数 / 状态。**唯一例外是「关于」**（`collapsible: false`）。
+
+四个分页与分页下的父分类（新增设置项请放进最贴近的那一类，别再往大类里追加）：
+
+| 分页 | 父分类 |
+| --- | --- |
+| 内容与订阅 | 订阅配置 / 站点 / Kazumi 规则 / 直播源 / 导入诊断 |
+| 播放与外观 | 外观 / 界面与首页 / 播放行为 / 缓冲与缓存 / 画面与播放器 / 下载与网盘 / 网络 / 字幕与弹幕 / 运行时组件 / 性能 |
+| 网盘与数据 | 网盘账户 / WebDAV / 数据（备份、清理、运行日志） |
+| 安全与关于 | 内容过滤 / 隐私与快捷键（老板键） / 关于 |
+
+### 检查更新
+
+启动后 `UpdateGate` 会请求 GitHub 的 `/releases/latest`，只有远端版本高于
+`kAppVersion`（`lib/core/app_version.dart`，与 `pubspec.yaml` 的 `version` 保持一致，
+有测试守护）才弹窗，三个按钮分别是【下载】（打开 release 里的 Windows zip 资产，
+没有资产就打开 release 页面）、【网盘下载】（123 云盘固定地址）、【稍后提醒】
+（什么都不持久化，所以下次启动还会再弹）。仓库没有 release 时会退回 release 列表、
+再退回 tag，且只认版本形状的 tag（`v0.9.1`）。
+
+要真正触发提示：在 GitHub 上发布一个 tag 高于当前版本的 release（例如 `v0.9.1`）
+并填好更新说明即可。调试弹窗可以用
+`flutter build windows --release --dart-define=MISA_UPDATE_REPO=microsoft/vscode`
+把检查指向别的仓库，不传时用本仓库（常量会被 tree-shake）。
 
 ## Windows 渲染与内存
 

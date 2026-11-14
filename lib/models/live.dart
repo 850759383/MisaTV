@@ -34,6 +34,52 @@ class LiveChannel {
   final String catchupType;
   final String catchupSource;
   final String catchupReplace;
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'urls': urls,
+    'logo': logo,
+    'epg': epg,
+    'ua': ua,
+    'click': click,
+    'format': format,
+    'origin': origin,
+    'referer': referer,
+    'tvgId': tvgId,
+    'tvgName': tvgName,
+    'tvgChno': tvgChno,
+    if (header != null) 'header': header,
+    'catchupType': catchupType,
+    'catchupSource': catchupSource,
+    'catchupReplace': catchupReplace,
+  };
+
+  factory LiveChannel.fromJson(Map<String, dynamic> json) => LiveChannel(
+    name: (json['name'] ?? '').toString(),
+    urls: [
+      for (final item in (json['urls'] is List ? json['urls'] as List : const []))
+        item.toString(),
+    ],
+    logo: (json['logo'] ?? '').toString(),
+    epg: (json['epg'] ?? '').toString(),
+    ua: (json['ua'] ?? '').toString(),
+    click: (json['click'] ?? '').toString(),
+    format: (json['format'] ?? '').toString(),
+    origin: (json['origin'] ?? '').toString(),
+    referer: (json['referer'] ?? '').toString(),
+    tvgId: (json['tvgId'] ?? '').toString(),
+    tvgName: (json['tvgName'] ?? '').toString(),
+    tvgChno: (json['tvgChno'] ?? '').toString(),
+    header: json['header'] is Map
+        ? {
+            for (final e in (json['header'] as Map).entries)
+              e.key.toString(): e.value.toString(),
+          }
+        : null,
+    catchupType: (json['catchupType'] ?? '').toString(),
+    catchupSource: (json['catchupSource'] ?? '').toString(),
+    catchupReplace: (json['catchupReplace'] ?? '').toString(),
+  );
 }
 
 class LiveLine {
@@ -41,12 +87,38 @@ class LiveLine {
   final int index;
   final String name;
   final String url;
+
+  Map<String, dynamic> toJson() => {
+    'index': index,
+    'name': name,
+    'url': url,
+  };
+
+  factory LiveLine.fromJson(Map<String, dynamic> json) => LiveLine(
+    index: (json['index'] as num?)?.toInt() ?? 0,
+    name: (json['name'] ?? '').toString(),
+    url: (json['url'] ?? '').toString(),
+  );
 }
 
 class LiveGroup {
   const LiveGroup({required this.group, required this.channels});
   final String group;
   final List<LiveChannel> channels;
+
+  Map<String, dynamic> toJson() => {
+    'group': group,
+    'channels': channels.map((e) => e.toJson()).toList(),
+  };
+
+  factory LiveGroup.fromJson(Map<String, dynamic> json) => LiveGroup(
+    group: (json['group'] ?? '').toString(),
+    channels: [
+      for (final item in (json['channels'] is List ? json['channels'] as List : const []))
+        if (item is Map)
+          LiveChannel.fromJson(Map<String, dynamic>.from(item)),
+    ],
+  );
 }
 
 List<LiveLine> channelLines(LiveChannel channel) {

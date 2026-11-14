@@ -374,8 +374,10 @@ class PlayerSettings {
     this.externalPlayers = const [],
     this.defaultPlayer = kDefaultPlayerBuiltin,
     this.immersiveMode = false,
+    this.popOutPlayer = false,
     this.artworkPriority = 'douban',
     this.tmdbApiKey = '',
+    this.tmdbReadToken = '',
     this.bossKey = kDefaultBossKey,
   });
   final double speed;
@@ -400,11 +402,24 @@ class PlayerSettings {
   /// 沉浸观影模式：除播放器外的页面切换为大屏 TV 布局。
   final bool immersiveMode;
 
+  /// 内置播放器独立窗口：在主界面之外另开一个完整播放器窗口；
+  /// false = 与现在一样嵌入软件主界面。沉浸观影模式下不生效。
+  final bool popOutPlayer;
+
+  /// [popOutPlayer] 的实际生效值：沉浸观影模式是独占全屏的大屏布局，
+  /// 此时独立窗口一律不弹（设置本身保留，退出沉浸后自动恢复）。
+  bool get effectivePopOutPlayer => popOutPlayer && !immersiveMode;
+
   /// 横图封面优先来源：`douban` / `tmdb` / `imdb`。
   final String artworkPriority;
 
-  /// TMDB API Key（v3 key 或 v4 Read Access Token）；空 = 不启用 TMDB。
+  /// TMDB 的 v3 API Key（32 位十六进制，走 query 的 `api_key`）；空 = 未填。
   final String tmdbApiKey;
+
+  /// TMDB 的 v4 Read Access Token（JWT，走 `Authorization: Bearer`）；空 = 未填。
+  ///
+  /// 两份都填时优先用这个：令牌走请求头，密钥不会出现在 URL 里。
+  final String tmdbReadToken;
 
   /// 老板键：暂停视频并隐藏到托盘 / 原样恢复；见 [kBossKeyShortcuts]。
   /// `off` = 关闭；沉浸观影模式下不生效。
@@ -435,8 +450,10 @@ class PlayerSettings {
     List<ExternalPlayerEntry>? externalPlayers,
     String? defaultPlayer,
     bool? immersiveMode,
+    bool? popOutPlayer,
     String? artworkPriority,
     String? tmdbApiKey,
+    String? tmdbReadToken,
     String? bossKey,
   }) => PlayerSettings(
     speed: speed ?? this.speed,
@@ -460,10 +477,12 @@ class PlayerSettings {
     externalPlayers: externalPlayers ?? this.externalPlayers,
     defaultPlayer: normalizeDefaultPlayer(defaultPlayer ?? this.defaultPlayer),
     immersiveMode: immersiveMode ?? this.immersiveMode,
+    popOutPlayer: popOutPlayer ?? this.popOutPlayer,
     artworkPriority: normalizeArtworkPriority(
       artworkPriority ?? this.artworkPriority,
     ),
     tmdbApiKey: tmdbApiKey ?? this.tmdbApiKey,
+    tmdbReadToken: tmdbReadToken ?? this.tmdbReadToken,
     bossKey: normalizeBossKey(bossKey ?? this.bossKey),
   );
 
@@ -525,8 +544,10 @@ class PlayerSettings {
     'externalPlayers': externalPlayers.map((e) => e.toJson()).toList(),
     'defaultPlayer': defaultPlayer,
     'immersiveMode': immersiveMode,
+    'popOutPlayer': popOutPlayer,
     'artworkPriority': artworkPriority,
     'tmdbApiKey': tmdbApiKey,
+    'tmdbReadToken': tmdbReadToken,
     'bossKey': bossKey,
   };
 
@@ -572,10 +593,12 @@ class PlayerSettings {
       (j['defaultPlayer'] ?? '').toString(),
     ),
     immersiveMode: (j['immersiveMode'] as bool?) ?? false,
+    popOutPlayer: (j['popOutPlayer'] as bool?) ?? false,
     artworkPriority: normalizeArtworkPriority(
       (j['artworkPriority'] ?? '').toString(),
     ),
     tmdbApiKey: (j['tmdbApiKey'] ?? '').toString().trim(),
+    tmdbReadToken: (j['tmdbReadToken'] ?? '').toString().trim(),
     bossKey: normalizeBossKey((j['bossKey'] ?? '').toString()),
   );
 }

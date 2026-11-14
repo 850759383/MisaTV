@@ -19,6 +19,15 @@ String redactUrl(String raw) {
   }
 }
 
+/// 把文本里 URL 的 query **值**打码，只留键名。
+///
+/// 异常字符串常带完整地址（`ClientException ... uri=https://api.themoviedb.org/3/?api_key=…`），
+/// 原样进日志和界面提示就等于把 Key 写进磁盘，这里统一遮掉。
+String redactQueryValues(String text) => text.replaceAllMapped(
+  RegExp(r'([?&][A-Za-z0-9_.\-]+=)[^&\s)"\]]+'),
+  (m) => '${m.group(1)}<hidden>',
+);
+
 /// 截断过长文本（堆栈 / 蜘蛛返回的原文）。
 String shorten(String text, [int max = 400]) {
   final value = text.trim();

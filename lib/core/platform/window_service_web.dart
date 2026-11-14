@@ -23,6 +23,9 @@ void registerAppShutdown(Future<void> Function() hook) {}
 
 Widget windowFrame(Widget child) => child;
 
+/// Web 版没有独立播放器窗口，竖版适配是空操作。
+Future<void> fitAppWindowToVideo(double videoWidth, double videoHeight) async {}
+
 Future<void> minimizeAppWindow() async {}
 
 Future<void> hideAppWindowToTray() async {}

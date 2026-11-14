@@ -72,5 +72,28 @@ void main() {
         contains('BDUSS'),
       );
     });
+
+    test('哔哩只认 SESSDATA', () {
+      expect(driveCookieHasAuth('bili', 'SESSDATA=abc'), isTrue);
+      expect(driveCookieHasAuth('bili', 'buvid3=abc'), isFalse);
+      expect(driveCookieMissingHint('bili'), contains('SESSDATA'));
+    });
+
+    test('115 需要 UID / CID / SEID 三件套齐全', () {
+      expect(driveCookieHasAuth('115', 'UID=1'), isTrue);
+      // 只有 UID 是半个会话，服务端仍判未登录。
+      expect(driveCookieIsComplete('115', 'UID=1'), isFalse);
+      expect(driveCookieIsComplete('115', 'UID=1; CID=2'), isFalse);
+      expect(driveCookieIsComplete('115', 'UID=1; CID=2; SEID=3'), isTrue);
+      expect(
+        driveCookieMissingHint('115'),
+        allOf(contains('UID'), contains('CID'), contains('SEID')),
+      );
+    });
+
+    test('没有额外要求的 provider 只校验登录态字段', () {
+      expect(driveCookieIsComplete('quark', '__puus=x'), isTrue);
+      expect(driveCookieIsComplete('bili', 'SESSDATA=x'), isTrue);
+    });
   });
 }

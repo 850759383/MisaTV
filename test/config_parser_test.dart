@@ -102,6 +102,47 @@ void main() {
       expect(parsed.config.sites.length, 1);
     });
 
+    test('相对路径：字符串起头 / 单引号 / \$\$\$ 多段都按订阅地址解析', () {
+      // qist/tvbox 这类订阅的 ext 会写成 `./lib/token.json$$$./json/a.txt`，
+      // 也有 `{'token': './lib/token.json'}` 这种单引号包着的 JSON 串；
+      // 只认 `"./` 的话蜘蛛会拿到打不开的相对地址。
+      const json = r'''
+      {
+        "spider":"./jar/x.jar;md5;abc",
+        "sites":[
+          {"key":"a","type":3,"api":"csp_PushShare","ext":"./lib/token.json$$$./json/a.txt$$$db"},
+          {"key":"b","type":3,"api":"csp_Youtube","ext":"{'token': './lib/token.json', 'json': './json/y.json'}"}
+        ],
+        "lives":[{"name":"l","type":0,"url":"./listx.txt"}]
+      }
+      ''';
+      final parsed = ConfigParser.parse(
+        json,
+        baseUrl: 'https://cdn.example.com/sub/99188.json',
+      );
+      expect(
+        parsed.config.spider,
+        'https://cdn.example.com/sub/jar/x.jar;md5;abc',
+      );
+      final a = parsed.config.sites.firstWhere((s) => s.key == 'a');
+      expect(
+        a.ext,
+        'https://cdn.example.com/sub/lib/token.json'
+        '\$\$\$https://cdn.example.com/sub/json/a.txt'
+        '\$\$\$db',
+      );
+      final b = parsed.config.sites.firstWhere((s) => s.key == 'b');
+      expect(
+        b.ext,
+        "{'token': 'https://cdn.example.com/sub/lib/token.json', "
+        "'json': 'https://cdn.example.com/sub/json/y.json'}",
+      );
+      expect(
+        parsed.config.lives.single.url,
+        'https://cdn.example.com/sub/listx.txt',
+      );
+    });
+
     test('宽松 JSON：注释与尾随逗号', () {
       const json = '''
       {

@@ -20,6 +20,7 @@ import '../../services/mpv_extension.dart';
 import '../../services/player/external_players.dart';
 import '../../services/torrent/torrent_play.dart';
 import '../../state/app_state.dart';
+import '../open_player.dart';
 import '../raw_play.dart';
 import '../widgets/drive_login_prompt.dart';
 import '../widgets/empty_state.dart';
@@ -347,10 +348,12 @@ class _DetailPageState extends State<DetailPage> {
       return;
     }
     // 线路名就写明是哪个网盘时，先补登录再解析：只查本地账号，不联网，不会拖慢打开。
+    // 可选增强（哔哩）不拦：没 Cookie 也能播 360P / 480P，只是画质低。
     final hint = driveHintFromFlag(flag);
     if (allowLogin &&
         hint != null &&
         hint.supported &&
+        !hint.optional &&
         !app.hasDriveAccount(hint.provider)) {
       final ready = await promptDriveLogin(context, hint);
       if (!mounted) return;
@@ -532,20 +535,19 @@ class _DetailPageState extends State<DetailPage> {
         completeDismissed();
         gate.dispose();
         if (!mounted) return;
-        await Navigator.of(context, rootNavigator: true).push(
-          MaterialPageRoute(
-            builder: (_) => PlayerPage(
-              session: PlayerSession(
-                detail: detail,
-                site: site,
-                flag: flag,
-                episodeIndex: index,
-                episodes: episodes,
-                initialPlay: play,
-                startPositionMs: startMs,
-              ),
-            ),
+        await openVodPlayer(
+          context,
+          app,
+          PlayerSession(
+            detail: detail,
+            site: site,
+            flag: flag,
+            episodeIndex: index,
+            episodes: episodes,
+            initialPlay: play,
+            startPositionMs: startMs,
           ),
+          rootNavigator: true,
         );
         return;
       }
@@ -579,20 +581,19 @@ class _DetailPageState extends State<DetailPage> {
       return;
     }
     if (!mounted) return;
-    await Navigator.of(context, rootNavigator: true).push(
-      MaterialPageRoute(
-        builder: (_) => PlayerPage(
-          session: PlayerSession(
-            detail: detail,
-            site: site,
-            flag: flag,
-            episodeIndex: index,
-            episodes: episodes,
-            initialPlay: play,
-            startPositionMs: startMs,
-          ),
-        ),
+    await openVodPlayer(
+      context,
+      app,
+      PlayerSession(
+        detail: detail,
+        site: site,
+        flag: flag,
+        episodeIndex: index,
+        episodes: episodes,
+        initialPlay: play,
+        startPositionMs: startMs,
       ),
+      rootNavigator: true,
     );
   }
 
@@ -631,6 +632,17 @@ class _DetailPageState extends State<DetailPage> {
     var playerName = isMpv
         ? 'Yaozhi MPV'
         : externalPlayerDisplayName(customPath);
+    // 多集时把整份选集列表交给外部播放器（M3U 每项回指本机中继）。
+    final service = app.externalPlaylist;
+    final playlist = service == null || episodes.length < 2
+        ? null
+        : await service.createPlaylist(
+            site: site,
+            flag: flag,
+            episodes: episodes,
+            currentIndex: index,
+            currentUrl: source.url,
+          );
     try {
       if (isMpv) {
         final exe = await MpvExtension.instance.executablePath;
@@ -639,9 +651,9 @@ class _DetailPageState extends State<DetailPage> {
           return false;
         }
         await MpvExtension.instance.open(
-          source.url,
-          headers: source.headers,
-          startSeconds: seconds,
+          playlist ?? source.url,
+          headers: playlist == null ? source.headers : const {},
+          startSeconds: playlist == null ? seconds : 0,
         );
       } else {
         if (customPath.isEmpty) return false;
@@ -660,8 +672,10 @@ class _DetailPageState extends State<DetailPage> {
         }
         final ok = launchExternalPlayer(
           customPath,
-          source.url,
-          extraArgs: externalSeekArgs(externalPlayerKind(customPath), seconds),
+          playlist ?? source.url,
+          extraArgs: playlist == null
+              ? externalSeekArgs(externalPlayerKind(customPath), seconds)
+              : const [],
         );
         if (!ok) {
           _toast('启动 $playerName 失败，已改用内置播放器');
@@ -736,7 +750,7 @@ class _DetailPageState extends State<DetailPage> {
       if (play.playable || !canLogin) return play;
 
       final hint = driveHintFromMessage(play.message);
-      if (hint == null || !hint.supported) return play;
+      if (hint == null || !hint.supported || hint.optional) return play;
       final token = (app.driveAccounts[hint.provider]?.extra['uctvToken'] ?? '')
           .trim();
       final ready =
@@ -919,10 +933,13 @@ class _DetailPageState extends State<DetailPage> {
   }
 
   /// 线路对应的网盘本机能不能直接扫码、现在是否还没登录（决定是否挂锁）。
+  ///
+  /// 可选增强（哔哩）不挂锁：没 Cookie 也能播，挂锁只会误导用户以为不能点。
   bool _needsLogin(AppState app, String flag) {
     final hint = driveHintFromFlag(flag);
     return hint != null &&
         hint.supported &&
+        !hint.optional &&
         !app.hasDriveAccount(hint.provider);
   }
 

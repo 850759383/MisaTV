@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../app.dart';
 import '../../services/drive/drive_line_hint.dart';
+import 'drive_cookie_dialog.dart';
 import 'drive_web_login_dialog.dart';
 import 'uc_tv_login_dialog.dart';
 
@@ -14,6 +15,8 @@ Future<bool> promptDriveLogin(
   DriveLineHint hint, {
   String message = '',
 }) async {
+  // 可选增强（哔哩）：没登录也能播低画质，绝不能弹窗拦住播放。
+  if (hint.optional) return true;
   if (!hint.supported) {
     if (context.mounted) {
       await _showUnsupported(context, hint, message);
@@ -23,6 +26,11 @@ Future<bool> promptDriveLogin(
 
   final app = AppScope.of(context);
   if (!app.hasDriveAccount(hint.provider)) {
+    if (!hint.webLogin) {
+      // 115 这类没有网页扫码的网盘：直接给手动 Cookie 输入框。
+      if (context.mounted) await _showManualCookieHint(context, hint, message);
+      return false;
+    }
     final ok = await showDriveLoginDialog(context, hint.provider);
     if (ok != true || !context.mounted) return false;
   }
@@ -37,6 +45,39 @@ Future<bool> promptDriveLogin(
   return true;
 }
 
+/// 只能手动粘贴 Cookie 的网盘：给出入口，而不是一句「请去配置中心」。
+Future<void> _showManualCookieHint(
+  BuildContext context,
+  DriveLineHint hint,
+  String message,
+) async {
+  final open = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text('${hint.name}还没有登录'),
+      content: Text(
+        [
+          if (message.isNotEmpty) message,
+          '本机不内置 ${hint.name} 的网页扫码登录。'
+              '请在浏览器登录后复制 Cookie，粘贴到这里保存。',
+        ].join('\n\n'),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          child: const Text('粘贴 Cookie'),
+        ),
+      ],
+    ),
+  );
+  if (open != true || !context.mounted) return;
+  await showDriveCookieDialog(context, hint.provider);
+}
+
 Future<void> _showUnsupported(
   BuildContext context,
   DriveLineHint hint,
@@ -49,7 +90,8 @@ Future<void> _showUnsupported(
       content: Text(
         [
           if (message.isNotEmpty) message,
-          '本机只内置了夸克 / UC / 百度的扫码登录；这条线路请换其他可用线路再试。',
+          '本机只内置了夸克 / UC / 百度的扫码登录，以及 115 / 哔哩的手动 Cookie；'
+          '这条线路请换其他可用线路再试。',
         ].join('\n\n'),
       ),
       actions: [

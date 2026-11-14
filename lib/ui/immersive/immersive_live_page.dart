@@ -6,7 +6,8 @@ import '../../app.dart';
 import '../../models/live.dart';
 import '../../models/site_config.dart';
 import '../../services/live/epg.dart';
-import '../pages/live_player_page.dart';
+import '../open_player.dart';
+import '../widgets/mouse_drag_scroll.dart';
 import 'immersive_widgets.dart';
 
 /// 沉浸观影直播页：分组频道墙，直接进现有直播播放器。
@@ -92,20 +93,19 @@ class _ImmersiveLivePageState extends State<ImmersiveLivePage> {
   }
 
   Future<void> _play(LiveBean bean, LiveChannel channel, LiveLine line) async {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => LivePlayerPage(
-          bean: bean,
-          channel: channel,
-          initialLine: line,
-          epg: entryOf(_epg, epgRefOf(channel)),
-          groups: _groups,
-          epgEntries: _epg,
-          initialGroup: _groups.isEmpty
-              ? ''
-              : _groups[_groupIndex.clamp(0, _groups.length - 1)].group,
-        ),
-      ),
+    final app = AppScope.of(context);
+    await openLivePlayer(
+      context,
+      app,
+      bean: bean,
+      channel: channel,
+      initialLine: line,
+      epg: entryOf(_epg, epgRefOf(channel)),
+      groups: _groups,
+      epgEntries: _epg,
+      initialGroup: _groups.isEmpty
+          ? ''
+          : _groups[_groupIndex.clamp(0, _groups.length - 1)].group,
     );
   }
 
@@ -215,18 +215,23 @@ class _ImmersiveLivePageState extends State<ImmersiveLivePage> {
           else ...[
             SizedBox(
               height: 42,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: _groups.length,
-                separatorBuilder: (_, _) => const SizedBox(width: 8),
-                itemBuilder: (context, index) {
-                  final selected = index == _groupIndex;
-                  return ChoiceChip(
-                    label: Text(_groups[index].group),
-                    selected: selected,
-                    onSelected: (_) => setState(() => _groupIndex = index),
-                  );
-                },
+              // 分组多时会超出宽度：桌面端默认不让鼠标拖动横向列表，
+              // 必须显式换成可拖拽的 ScrollBehavior，否则后面的分组永远够不着。
+              child: ScrollConfiguration(
+                behavior: const MouseDragScrollBehavior(),
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _groups.length,
+                  separatorBuilder: (_, _) => const SizedBox(width: 8),
+                  itemBuilder: (context, index) {
+                    final selected = index == _groupIndex;
+                    return ChoiceChip(
+                      label: Text(_groups[index].group),
+                      selected: selected,
+                      onSelected: (_) => setState(() => _groupIndex = index),
+                    );
+                  },
+                ),
               ),
             ),
             const SizedBox(height: 16),
@@ -310,14 +315,14 @@ class _LiveChannelTileState extends State<_LiveChannelTile> {
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.titleMedium?.copyWith(
                   fontWeight: FontWeight.w800,
-                  color: _hover ? Colors.white : Colors.white.withValues(alpha: 0.86),
+                  color: _hover
+                      ? Colors.white
+                      : Colors.white.withValues(alpha: 0.86),
                 ),
               ),
               const SizedBox(height: 6),
               Text(
-                current == null
-                    ? '点击播放'
-                    : '${current.range} ${current.title}',
+                current == null ? '点击播放' : '${current.range} ${current.title}',
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.labelSmall?.copyWith(

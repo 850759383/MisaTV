@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import '../../core/logging/app_log.dart';
 import '../../core/net/app_http.dart';
+import '../../core/net/proxy_runtime.dart';
 import '../../models/user_data.dart';
 import '../discover/discover_models.dart';
 import '../discover/discover_service.dart';
+import 'tmdb_auth.dart';
+import 'tmdb_network.dart';
 
 /// 沉浸观影的横图封面来源：豆瓣 / TMDB / IMDb。
 ///
@@ -49,7 +53,7 @@ class ArtworkService {
         : year.trim();
     final key =
         '${normalizeArtworkPriority(settings.artworkPriority)}|'
-        '${settings.tmdbApiKey}|$artworkTitle|$effectiveYear';
+        '${settings.tmdbReadToken}|${settings.tmdbApiKey}|$artworkTitle|$effectiveYear';
     final cached = _cache[key];
     if (cached != null) return Future.value(cached.isEmpty ? null : cached);
     final pending = _inflight[key];
@@ -116,7 +120,7 @@ class ArtworkService {
         ? episodeNumbers
         : const <int>[];
     final key =
-        'still|${settings.tmdbApiKey}|$artworkTitle|$effectiveYear|'
+        'still|${settings.tmdbReadToken}|${settings.tmdbApiKey}|$artworkTitle|$effectiveYear|'
         '$episodeCount|${hint ?? 0}|${numbers.join(',')}';
     final cached = _stillCache[key];
     if (cached != null) return Future.value(cached);
@@ -154,7 +158,7 @@ class ArtworkService {
         ...const ['douban', 'tmdb', 'imdb'].where((s) => s != priority),
       ];
       for (final source in order) {
-        if (source == 'tmdb' && settings.tmdbApiKey.trim().isEmpty) continue;
+        if (source == 'tmdb' && !_tmdbConfigured) continue;
         try {
           final url = await _trySource(source, name, year);
           if (url != null && url.trim().isNotEmpty) {
@@ -536,26 +540,20 @@ class ArtworkService {
     bool preferTv = false,
     bool trailingSequel = false,
   }) async {
-    final key = config().tmdbApiKey.trim();
-    if (key.isEmpty) return null;
+    final credential = _tmdbCredential();
+    if (!credential.isConfigured) return null;
     final query = _titleInfo(name, trailingSequel: trailingSequel);
     if (query.key.isEmpty) return null;
-    final token = _looksLikeTmdbToken(key);
-    final headers = token
-        ? {'Authorization': 'Bearer $key'}
-        : <String, String>{};
     final params = <String, String>{
       'language': 'zh-CN',
       'query': name,
       'include_adult': 'false',
-      if (!token) 'api_key': key,
+      ...credential.queryParams,
     };
-    final res = await http.getText(
-      Uri.parse('https://api.themoviedb.org/3/search/multi')
-          .replace(queryParameters: params)
-          .toString(),
-      headers: headers,
-      timeout: const Duration(seconds: 15),
+    final res = await _tmdbGet(
+      'search/multi',
+      query: params,
+      headers: credential.headers,
     );
     final decoded = jsonDecode(res.body);
     final results = decoded is Map ? decoded['results'] : null;
@@ -604,18 +602,12 @@ class ArtworkService {
     String path,
     Map<String, String> query,
   ) async {
-    final key = config().tmdbApiKey.trim();
-    if (key.isEmpty) return null;
-    final token = _looksLikeTmdbToken(key);
-    final headers = token
-        ? {'Authorization': 'Bearer $key'}
-        : <String, String>{};
-    final res = await http.getText(
-      Uri.parse('https://api.themoviedb.org/3/$path')
-          .replace(queryParameters: {...query, if (!token) 'api_key': key})
-          .toString(),
-      headers: headers,
-      timeout: const Duration(seconds: 15),
+    final credential = _tmdbCredential();
+    if (!credential.isConfigured) return null;
+    final res = await _tmdbGet(
+      path,
+      query: {...query, ...credential.queryParams},
+      headers: credential.headers,
     );
     final decoded = jsonDecode(res.body);
     return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
@@ -692,7 +684,7 @@ class ArtworkService {
         seasonHint,
       );
       if (bili.any((still) => still != null)) return bili;
-      if (config().tmdbApiKey.trim().isEmpty) return const <String?>[];
+      if (!_tmdbConfigured) return const <String?>[];
       for (final candidate in episodeTitleCandidates(name)) {
         final stills = await _tmdbEpisodeStillsForName(
           candidate,
@@ -1246,8 +1238,66 @@ class ArtworkService {
     return matches.last.group(0)!;
   }
 
-  static bool _looksLikeTmdbToken(String key) =>
-      key.startsWith('eyJ') || key.length > 60;
+  /// TMDB 请求统一出口：传输失败时把「域名被污染 / 需要代理」讲清楚。
+  Future<HttpResponseText> _tmdbGet(
+    String path, {
+    Map<String, String> query = const {},
+    Map<String, String> headers = const {},
+  }) async {
+    final url = Uri.parse('https://api.themoviedb.org/3/$path')
+        .replace(queryParameters: query)
+        .toString();
+    try {
+      return await http.getText(
+        url,
+        headers: headers,
+        timeout: const Duration(seconds: 15),
+      );
+    } on AppHttpException catch (e) {
+      // 401 / 404 这类是凭据或数据问题，原样抛出，别用代理提示盖住。
+      if (e.statusCode != null) rethrow;
+      throw AppHttpException(
+        '连不上 api.themoviedb.org：${await _tmdbFailureReason(e)}',
+      );
+    }
+  }
+
+  /// 传输层失败时给一句能照着做的原因：很多时候是域名被 DNS 污染，不是配置错。
+  Future<String> _tmdbFailureReason(AppHttpException error) async {
+    final proxyActive = ProxyRuntime.instance.enabled;
+    var addresses = const <String>[];
+    try {
+      final resolved = await InternetAddress.lookup('api.themoviedb.org')
+          .timeout(const Duration(seconds: 5));
+      addresses = [for (final item in resolved) item.address];
+    } catch (_) {
+      // 解析失败按「没有可用地址」处理
+    }
+    final diagnosis = describeTmdbDns(
+      addresses: addresses,
+      proxyActive: proxyActive,
+    );
+    return '${error.message}。$diagnosis';
+  }
+
+  /// TMDB 是否已配置（v3 Key 或 v4 Token 任一可用）。
+  bool get _tmdbConfigured => _tmdbCredential().isConfigured;
+
+  /// 读取并归一 TMDB 凭据（v3 Key / v4 Token，见 [TmdbCredential]）。
+  ///
+  /// 填了但格式不对时只记一条脱敏日志，然后按「未配置」处理，
+  /// 免得把一份错配置当成能用的来源反复请求。
+  TmdbCredential _tmdbCredential() {
+    final settings = config();
+    final credential = TmdbCredential.resolve(
+      apiKey: settings.tmdbApiKey,
+      readToken: settings.tmdbReadToken,
+    );
+    if (!credential.isConfigured && credential.problem.isNotEmpty) {
+      AppLog.w('artwork', 'TMDB 凭据无法识别：${credential.problem}');
+    }
+    return credential;
+  }
 
   static String _tmdbImage(String path) {
     final clean = path.trim();

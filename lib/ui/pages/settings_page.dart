@@ -5,8 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../app.dart';
+import '../../core/app_version.dart';
 import '../../core/logging/app_log.dart';
 import '../../core/net/proxy_config.dart';
+import '../../core/net/proxy_runtime.dart';
+import '../../core/platform/player_window.dart';
 import '../../core/platform/window_service.dart';
 import '../../models/dav.dart';
 import '../../models/player_fit.dart';
@@ -14,9 +17,11 @@ import '../../models/site_config.dart';
 import '../../models/source_health.dart';
 import '../../models/user_data.dart';
 import '../../services/artwork/artwork_service.dart';
+import '../../services/artwork/tmdb_auth.dart';
 import '../../services/backup_data.dart';
 import '../../services/boss_key/boss_key_service.dart';
 import '../../services/content_filter.dart';
+import '../../services/update/update_service.dart';
 import '../../services/danmaku/danmaku_endpoints.dart';
 import '../../services/danmaku/danmaku_models.dart';
 import '../../services/danmaku/danmaku_settings.dart';
@@ -41,6 +46,7 @@ import '../widgets/import_sheet.dart';
 import '../widgets/name_input_dialog.dart';
 import '../widgets/proxy_pool_sheet.dart';
 import '../widgets/uc_tv_login_dialog.dart';
+import '../widgets/update_dialog.dart';
 import '../widgets/xunlei_login_dialog.dart';
 import 'dav_browse_page.dart';
 
@@ -601,44 +607,7 @@ class SettingsPageState extends State<SettingsPage> {
                           value: app.themeMode,
                           onChanged: (mode) => app.setThemeMode(mode),
                         ),
-                        const SizedBox(height: 14),
-                        SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text('沉浸观影模式'),
-                          subtitle: const Text(
-                            '大屏 TV 布局：首页海报轮播、横图卡片、沉浸式详情页（选集自动匹配 B 站/TMDB 剧照）；播放器保持不变',
-                          ),
-                          value: app.playerSettings.immersiveMode,
-                          onChanged: (value) async {
-                            await app.setPlayerSettings(
-                              app.playerSettings.copyWith(immersiveMode: value),
-                            );
-                            if (context.mounted) {
-                              _settingsSnack(
-                                context,
-                                value ? '已开启沉浸观影模式' : '已退出沉浸观影模式',
-                              );
-                            }
-                          },
-                        ),
-                        _ActionRow(
-                          icon: Icons.keyboard_outlined,
-                          title: '老板键',
-                          subtitle:
-                              '${bossKeyLabel(app.playerSettings.bossKey)}'
-                              ' · 暂停视频并收进托盘；沉浸观影模式下不生效',
-                          onTap: () => _openBossKeySettings(context, app),
-                        ),
-                        _ActionRow(
-                          icon: Icons.image_outlined,
-                          title: '横图封面来源',
-                          subtitle:
-                              '${_artworkSourceLabel(app.playerSettings.artworkPriority)}'
-                              '${app.playerSettings.tmdbApiKey.isEmpty ? ' · TMDB 未配置' : ''}',
-                          onTap: () => _openArtworkSettings(context, app),
-                        ),
-                        const Divider(height: 22),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 18),
                         Text('主题色', style: theme.textTheme.labelMedium),
                         const SizedBox(height: 10),
                         Wrap(
@@ -704,7 +673,101 @@ class SettingsPageState extends State<SettingsPage> {
                               ),
                           ],
                         ),
-                        const SizedBox(height: 18),
+                        const Divider(height: 24),
+                        const SizedBox(height: 4),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('沉浸观影模式'),
+                          subtitle: const Text(
+                            '大屏 TV 布局：首页海报轮播、横图卡片、沉浸式详情页（选集自动匹配 B 站/TMDB 剧照）；播放器保持不变',
+                          ),
+                          value: app.playerSettings.immersiveMode,
+                          onChanged: (value) async {
+                            await app.setPlayerSettings(
+                              app.playerSettings.copyWith(immersiveMode: value),
+                            );
+                            if (context.mounted) {
+                              _settingsSnack(
+                                context,
+                                value ? '已开启沉浸观影模式' : '已退出沉浸观影模式',
+                              );
+                            }
+                          },
+                        ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('首页台词轮换'),
+                          subtitle: const Text(
+                            '首页顶部每 30 秒轮换一句影视台词，点击可按片名搜索；关闭后连 LOGO 与档案名一起收起，导入按钮下移到「N 个可用站点」那一行',
+                          ),
+                          value: app.showMovieQuotes,
+                          onChanged: (value) => app.setShowMovieQuotes(value),
+                        ),
+                        // 只有 Windows 能另开窗口；其余平台不给一个按了没反应的开关。
+                        if (supportsStandalonePlayerWindow)
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('内置播放器独立窗口'),
+                            subtitle: Text(
+                              '在软件主界面之外打开独立播放器窗口，主界面保持可见；'
+                              '关闭则像现在一样在软件主界面内播放'
+                              '${app.playerSettings.immersiveMode && app.playerSettings.popOutPlayer ? '（沉浸观影模式下暂停生效，退出后自动恢复）' : ''}',
+                            ),
+                            value: app.playerSettings.popOutPlayer,
+                            onChanged: (value) async {
+                              await app.setPlayerSettings(
+                                app.playerSettings.copyWith(
+                                  popOutPlayer: value,
+                                ),
+                              );
+                              if (!context.mounted) return;
+                              final paused =
+                                  value && app.playerSettings.immersiveMode;
+                              _settingsSnack(
+                                context,
+                                !value
+                                    ? '内置播放器已改为嵌入主界面'
+                                    : paused
+                                    ? '已开启：沉浸观影模式下暂停生效，退出后自动恢复'
+                                    : '内置播放器将以独立窗口打开',
+                              );
+                            },
+                          ),
+                        _ActionRow(
+                          icon: Icons.image_outlined,
+                          title: '横图封面来源',
+                          subtitle:
+                              '${_artworkSourceLabel(app.playerSettings.artworkPriority)}'
+                              '${_tmdbCredentialLabel(app.playerSettings.tmdbApiKey, app.playerSettings.tmdbReadToken)}',
+                          onTap: () => _openArtworkSettings(context, app),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _Section(
+                    title: '界面与首页',
+                    icon: Icons.dashboard_customize_outlined,
+                    collapsible: true,
+                    initiallyExpanded: false,
+                    trailing: Text(
+                      app.playerSettings.immersiveMode ? '沉浸观影' : '标准布局',
+                      style: theme.textTheme.labelSmall,
+                    ),
+                    summary: Text(
+                      '沉浸观影：${app.playerSettings.immersiveMode ? '开' : '关'}'
+                      ' · 台词轮换：${app.showMovieQuotes ? '开' : '关'}'
+                      ' · 每行 ${app.homeColumns == 0 ? '自动' : '${app.homeColumns} 个'}',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(
+                          alpha: 0.45,
+                        ),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 4),
                         Text('分类浏览方式', style: theme.textTheme.labelMedium),
                         const SizedBox(height: 4),
                         Text(
@@ -816,10 +879,15 @@ class SettingsPageState extends State<SettingsPage> {
                   const SizedBox(height: 16),
                   _Section(
                     key: _playSectionKey,
-                    title: '播放',
+                    title: '播放行为',
                     icon: Icons.play_circle_outline_rounded,
                     collapsible: true,
                     initiallyExpanded: false,
+                    trailing: Text(
+                      '连播 ${app.playerSettings.autoPlayNext ? '开' : '关'}'
+                      ' · 换线 ${app.playerSettings.autoSwitchLine ? '开' : '关'}',
+                      style: theme.textTheme.labelSmall,
+                    ),
                     summary: _PlaySummary(app: app),
                     child: Column(
                       children: [
@@ -844,6 +912,50 @@ class SettingsPageState extends State<SettingsPage> {
                           ),
                           contentPadding: EdgeInsets.zero,
                         ),
+                        SwitchListTile.adaptive(
+                          value: app.playerSettings.rememberProgress,
+                          onChanged: (v) => app.setPlayerSettings(
+                            app.playerSettings.copyWith(rememberProgress: v),
+                          ),
+                          title: const Text('记住播放进度'),
+                          subtitle: const Text('退出播放器时保存进度，下次继续'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                        SwitchListTile.adaptive(
+                          value: app.playerSettings.m3u8Purify,
+                          onChanged: (v) => app.setPlayerSettings(
+                            app.playerSettings.copyWith(m3u8Purify: v),
+                          ),
+                          title: const Text('m3u8 去广告'),
+                          subtitle: const Text('点播清单播放前清洗广告分段（启发式，默认关）'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _Section(
+                    title: '缓冲与缓存',
+                    icon: Icons.speed_rounded,
+                    collapsible: true,
+                    initiallyExpanded: false,
+                    trailing: Text(
+                      app.playerSettings.streamCache ? '边播边缓存' : '不缓存',
+                      style: theme.textTheme.labelSmall,
+                    ),
+                    summary: Text(
+                      '预缓冲 ${app.playerSettings.bufferMinSec.toStringAsFixed(1)}s'
+                      ' · 最大 ${app.playerSettings.bufferMaxSec.toStringAsFixed(0)}s'
+                      ' · 缓存 ${app.playerSettings.streamCache ? '${app.playerSettings.streamCacheMb}MB' : '关'}',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(
+                          alpha: 0.45,
+                        ),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         _ActionRow(
                           icon: Icons.memory_rounded,
                           title: '播放缓冲',
@@ -879,6 +991,80 @@ class SettingsPageState extends State<SettingsPage> {
                           subtitle: '只清理边播缓存目录，不影响收藏 / 历史 / 订阅',
                           onTap: () => _clearStreamCache(context),
                         ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _Section(
+                    title: '画面与播放器',
+                    icon: Icons.aspect_ratio_rounded,
+                    collapsible: true,
+                    initiallyExpanded: false,
+                    trailing: Text(
+                      playerFitLabel(app.playerSettings.fit),
+                      style: theme.textTheme.labelSmall,
+                    ),
+                    summary: Text(
+                      '${playerFitLabel(app.playerSettings.fit)}'
+                      ' · ${_defaultPlayerLabel(app)}',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(
+                          alpha: 0.45,
+                        ),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _ActionRow(
+                          icon: Icons.aspect_ratio_rounded,
+                          title: '画面比例',
+                          subtitle: playerFitLabel(app.playerSettings.fit),
+                          onTap: () => _pickPlayerFit(context, app),
+                        ),
+                        if (!kIsWeb &&
+                            defaultTargetPlatform ==
+                                TargetPlatform.windows) ...[
+                          _ActionRow(
+                            icon: Icons.play_circle_outline_rounded,
+                            title: '默认播放器',
+                            subtitle: _defaultPlayerLabel(app),
+                            onTap: () => _pickDefaultPlayer(context, app),
+                          ),
+                          _ActionRow(
+                            icon: Icons.open_in_new_rounded,
+                            title: '自定义第三方播放器',
+                            subtitle: app.playerSettings.externalPlayers.isEmpty
+                                ? '未添加；可直接选择播放器 exe，无需安装识别'
+                                : '已添加 ${app.playerSettings.externalPlayers.length} 个播放器',
+                            onTap: () => _editExternalPlayers(context),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _Section(
+                    title: '下载与网盘',
+                    icon: Icons.cloud_download_outlined,
+                    collapsible: true,
+                    initiallyExpanded: false,
+                    trailing: Text(
+                      app.xunleiAccount.loggedIn ? '迅雷已登录' : '只用 aria2',
+                      style: theme.textTheme.labelSmall,
+                    ),
+                    summary: Text(
+                      '迅雷云盘：${app.xunleiAccount.loggedIn ? app.xunleiAccount.displayName : '未登录'}'
+                      ' · 磁力目录：${app.playerSettings.magnetDownloadDir.isEmpty ? '默认' : '自定义'}',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(
+                          alpha: 0.45,
+                        ),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         _ActionRow(
                           icon: Icons.cloud_download_outlined,
                           title: '迅雷云盘',
@@ -908,28 +1094,45 @@ class SettingsPageState extends State<SettingsPage> {
                               : app.playerSettings.magnetDownloadDir,
                           onTap: () => _pickMagnetDownloadDir(context, app),
                         ),
-                        SwitchListTile.adaptive(
-                          value: app.playerSettings.rememberProgress,
-                          onChanged: (v) => app.setPlayerSettings(
-                            app.playerSettings.copyWith(rememberProgress: v),
+                        _ActionRow(
+                          icon: Icons.extension_outlined,
+                          title: '网盘下载支持库',
+                          subtitle: '在浏览器中打开 123 云盘分享页（提取码 Misa）',
+                          onTap: () => launchUrl(
+                            Uri.parse(
+                              'https://1824896562.share.123pan.cn/123pan/syh2jv-j1p6h?pwd=Misa#',
+                            ),
                           ),
-                          title: const Text('记住播放进度'),
-                          subtitle: const Text('退出播放器时保存进度，下次继续'),
-                          contentPadding: EdgeInsets.zero,
                         ),
-                        SwitchListTile.adaptive(
-                          value: app.playerSettings.m3u8Purify,
-                          onChanged: (v) => app.setPlayerSettings(
-                            app.playerSettings.copyWith(m3u8Purify: v),
-                          ),
-                          title: const Text('m3u8 去广告'),
-                          subtitle: const Text('点播清单播放前清洗广告分段（启发式，默认关）'),
-                          contentPadding: EdgeInsets.zero,
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _Section(
+                    title: '网络',
+                    icon: Icons.vpn_lock_outlined,
+                    collapsible: true,
+                    initiallyExpanded: false,
+                    trailing: Text(
+                      app.proxy.enabled ? '手动代理' : '跟随系统',
+                      style: theme.textTheme.labelSmall,
+                    ),
+                    summary: Text(
+                      ProxyRuntime.instance.summary,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(
+                          alpha: 0.45,
                         ),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         _ActionRow(
                           icon: Icons.vpn_lock_outlined,
                           title: '网络代理',
-                          subtitle: app.proxy.summary,
+                          // 显示实际生效的上游：跟随系统代理时能看到解析到的地址。
+                          subtitle: ProxyRuntime.instance.summary,
                           onTap: () => _editProxy(context),
                         ),
                         // 隐藏项：在底部导航「设置」上连点 5 次才出现。
@@ -942,30 +1145,33 @@ class SettingsPageState extends State<SettingsPage> {
                                 : '直连 · ${app.proxyPool.nodes.length} 个节点',
                             onTap: () => showProxyPoolSheet(context, app),
                           ),
-                        _ActionRow(
-                          icon: Icons.aspect_ratio_rounded,
-                          title: '画面比例',
-                          subtitle: playerFitLabel(app.playerSettings.fit),
-                          onTap: () => _pickPlayerFit(context, app),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 16),
+                  _Section(
+                    title: '字幕与弹幕',
+                    icon: Icons.subtitles_outlined,
+                    collapsible: true,
+                    initiallyExpanded: false,
+                    trailing: Text(
+                      app.danmakuSettings.enabled ? '弹幕默认开' : '弹幕默认关',
+                      style: theme.textTheme.labelSmall,
+                    ),
+                    summary: Text(
+                      '弹幕：${app.danmakuSettings.enabled ? '开' : '关'}'
+                      ' · 字号 ${app.danmakuSettings.fontSize.toStringAsFixed(0)}'
+                      ' · assrt：${app.assrtToken.isEmpty ? '未配置' : '已配置'}',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(
+                          alpha: 0.45,
                         ),
-                        if (!kIsWeb &&
-                            defaultTargetPlatform ==
-                                TargetPlatform.windows) ...[
-                          _ActionRow(
-                            icon: Icons.play_circle_outline_rounded,
-                            title: '默认播放器',
-                            subtitle: _defaultPlayerLabel(app),
-                            onTap: () => _pickDefaultPlayer(context, app),
-                          ),
-                          _ActionRow(
-                            icon: Icons.open_in_new_rounded,
-                            title: '自定义第三方播放器',
-                            subtitle: app.playerSettings.externalPlayers.isEmpty
-                                ? '未添加；可直接选择播放器 exe，无需安装识别'
-                                : '已添加 ${app.playerSettings.externalPlayers.length} 个播放器',
-                            onTap: () => _editExternalPlayers(context),
-                          ),
-                        ],
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         _ActionRow(
                           icon: Icons.subtitles_outlined,
                           title: 'assrt 字幕 token',
@@ -1011,20 +1217,31 @@ class SettingsPageState extends State<SettingsPage> {
                           ),
                           onTap: () => _editDanmakuEndpoints(context),
                         ),
-                        _ActionRow(
-                          icon: Icons.cloud_download_outlined,
-                          title: '网盘下载支持库',
-                          subtitle: '在浏览器中打开 123 云盘分享页（提取码 Misa）',
-                          onTap: () => launchUrl(
-                            Uri.parse(
-                              'https://1824896562.share.123pan.cn/123pan/syh2jv-j1p6h?pwd=Misa#',
-                            ),
+                      ],
+                    ),
+                  ),
+                  if (!kIsWeb &&
+                      defaultTargetPlatform == TargetPlatform.windows) ...[
+                    const SizedBox(height: 16),
+                    _Section(
+                      title: '运行时组件',
+                      icon: Icons.memory_rounded,
+                      collapsible: true,
+                      initiallyExpanded: false,
+                      trailing: Text(
+                        'MPV / Python / JVM / 加固壳',
+                        style: theme.textTheme.labelSmall,
+                      ),
+                      summary: Text(
+                        '第三方播放器、蜘蛛运行时与加固壳解包组件按需下载',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: theme.colorScheme.onSurface.withValues(
+                            alpha: 0.45,
                           ),
                         ),
-                        if (!kIsWeb &&
-                            defaultTargetPlatform ==
-                                TargetPlatform.windows) ...[
-                          const Divider(height: 24),
+                      ),
+                      child: Column(
+                        children: [
                           const _MpvExtensionTile(),
                           const Divider(height: 24),
                           _PythonRuntimeTile(key: _pythonTileKey),
@@ -1033,9 +1250,9 @@ class SettingsPageState extends State<SettingsPage> {
                           const Divider(height: 24),
                           _ArmBridgeTile(key: _guardTileKey),
                         ],
-                      ],
+                      ),
                     ),
-                  ),
+                  ],
                   if (!kIsWeb) ...[
                     const SizedBox(height: 16),
                     _Section(
@@ -1149,6 +1366,38 @@ class SettingsPageState extends State<SettingsPage> {
                       ],
                     ),
                   ),
+                  const SizedBox(height: 16),
+                  _Section(
+                    title: '隐私与快捷键',
+                    icon: Icons.keyboard_outlined,
+                    collapsible: true,
+                    initiallyExpanded: false,
+                    trailing: Text(
+                      bossKeyLabel(app.playerSettings.bossKey),
+                      style: theme.textTheme.labelSmall,
+                    ),
+                    summary: Text(
+                      '老板键 ${bossKeyLabel(app.playerSettings.bossKey)}：暂停并收进托盘',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(
+                          alpha: 0.45,
+                        ),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _ActionRow(
+                          icon: Icons.keyboard_outlined,
+                          title: '老板键',
+                          subtitle:
+                              '${bossKeyLabel(app.playerSettings.bossKey)}'
+                              ' · 暂停视频并收进托盘；沉浸观影模式下不生效',
+                          onTap: () => _openBossKeySettings(context, app),
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
                 if (_pageIndex == _accountPage) ...[
                   if (!kIsWeb) const SizedBox(height: 16),
@@ -1239,7 +1488,10 @@ class SettingsPageState extends State<SettingsPage> {
                     icon: Icons.info_outline_rounded,
                     // 关于是设置页唯一常驻展开的父分类（其余分类都必须可折叠）。
                     collapsible: false,
-                    trailing: Text('v0.9.0', style: theme.textTheme.labelSmall),
+                    trailing: Text(
+                      'v$kAppVersion',
+                      style: theme.textTheme.labelSmall,
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -1267,7 +1519,7 @@ class SettingsPageState extends State<SettingsPage> {
                                   ),
                                 ),
                                 Text(
-                                  'v0.9.0 · Flutter 轻量重构',
+                                  'v$kAppVersion · Flutter 轻量重构',
                                   style: theme.textTheme.labelSmall?.copyWith(
                                     color: theme.colorScheme.onSurface
                                         .withValues(alpha: 0.70),
@@ -1286,6 +1538,13 @@ class SettingsPageState extends State<SettingsPage> {
                           ),
                         ),
                         const SizedBox(height: 8),
+                        _ActionRow(
+                          icon: Icons.system_update_alt_rounded,
+                          title: '检查更新',
+                          subtitle: '当前 v$kAppVersion · 有新版本会显示更新内容',
+                          onTap: () => _checkUpdates(context),
+                        ),
+                        const SizedBox(height: 4),
                         Wrap(
                           spacing: 10,
                           runSpacing: 8,
@@ -1320,6 +1579,18 @@ class SettingsPageState extends State<SettingsPage> {
         );
       },
     );
+  }
+
+  /// 手动检查更新：没有新版本就给一条提示，有就直接弹更新框。
+  Future<void> _checkUpdates(BuildContext context) async {
+    _settingsSnack(context, '正在检查更新…');
+    final release = await UpdateService().check();
+    if (!context.mounted) return;
+    if (release == null) {
+      _settingsSnack(context, '已经是最新版本（v$kAppVersion）');
+      return;
+    }
+    await showUpdateDialog(context, release);
   }
 
   Future<bool?> _confirm(BuildContext context, String title, String message) {
@@ -2417,14 +2688,13 @@ class _AppearanceSummary extends StatelessWidget {
         const SizedBox(width: 8),
         Flexible(
           child: Text(
-            '${app.homeColumns == 0 ? '封面自动' : '每行 ${app.homeColumns} 个'}'
-            ' · ${app.homeBrowseMode == 1 ? '瀑布' : '换页'}'
-            ' · 横条${switch (app.navBarSize) {
+            // 首页列数 / 浏览方式已挪到「界面与首页」，这里只描述外观本身。
+            '横条${switch (app.navBarSize) {
               0 => '紧凑',
               2 => '较大',
               3 => '超大',
               _ => '标准',
-            }}${app.navBarAutoHide ? '·自动隐藏' : ''}',
+            }}${app.navBarAutoHide ? ' · 自动隐藏' : ' · 常驻'}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: hint,
@@ -3473,10 +3743,18 @@ class _DriveAccountRow extends StatelessWidget {
     'quark' => Icons.cloud_circle_outlined,
     'uc' => Icons.cloud_queue_rounded,
     'baidu' => Icons.cloud_done_outlined,
+    '115' => Icons.folder_special_outlined,
+    'bili' => Icons.smart_display_outlined,
     _ => Icons.cloud_outlined,
   };
 
+  bool get _webLogin => driveSupportsWebLogin(provider);
+
   Future<void> _login(BuildContext context) async {
+    if (!_webLogin) {
+      await _manualCookie(context);
+      return;
+    }
     final ok = await showDriveLoginDialog(context, provider);
     if (ok == true && context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -3539,6 +3817,25 @@ class _DriveAccountRow extends StatelessWidget {
     final signedIn = hasCookie && !guest;
     final tvBound = (account?.extra['uctvToken'] ?? '').trim().isNotEmpty;
     final name = driveProviderNames[provider] ?? provider;
+    final optional = provider == 'bili';
+    final statusLabel = guest
+        ? '已失效'
+        : signedIn
+        ? '已登录'
+        : (optional ? '未配置' : '未登录');
+    final subtitleText = guest
+        ? (optional
+              ? 'Cookie 已失效，可重新粘贴（未配置也能播 360P / 480P）'
+              : '会话已失效（游客态），请重新扫码登录')
+        : (signedIn
+              ? (account!.username.isNotEmpty
+                    ? account.username
+                    : 'Cookie 已保存到本机')
+              : optional
+              ? '可选：粘贴浏览器 Cookie 后可用高清 / 大会员画质，不配置也能播 360P / 480P'
+              : (_webLogin
+                    ? '在官方网页中扫码登录，登录后蜘蛛源可读取网盘内的资源'
+                    : '粘贴浏览器 Cookie 后，蜘蛛源才能读取该网盘内的资源'));
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: Icon(_icon, size: 20),
@@ -3557,28 +3854,21 @@ class _DriveAccountRow extends StatelessWidget {
               borderRadius: BorderRadius.circular(6),
             ),
             child: Text(
-              guest ? '已失效' : (signedIn ? '已登录' : '未登录'),
+              statusLabel,
               style: TextStyle(
                 fontSize: 9,
                 fontWeight: FontWeight.w700,
                 color: signedIn
                     ? theme.colorScheme.primary
-                    : (guest ? theme.colorScheme.error : theme.disabledColor),
+                    : (guest && !optional
+                          ? theme.colorScheme.error
+                          : theme.disabledColor),
               ),
             ),
           ),
         ],
       ),
-      subtitle: Text(
-        guest
-            ? '会话已失效（游客态），请重新扫码登录'
-            : (signedIn
-                  ? (account!.username.isNotEmpty
-                        ? account.username
-                        : 'Cookie 已保存到本机')
-                  : '在官方网页中扫码登录，登录后蜘蛛源可读取网盘内的资源'),
-        style: theme.textTheme.labelSmall,
-      ),
+      subtitle: Text(subtitleText, style: theme.textTheme.labelSmall),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -3587,11 +3877,12 @@ class _DriveAccountRow extends StatelessWidget {
               onPressed: () => _ucTvLogin(context),
               child: Text(tvBound ? 'TV 已授权' : 'TV 扫码'),
             ),
-          TextButton(
-            onPressed: () => _manualCookie(context),
-            child: const Text('手动 Cookie'),
-          ),
-          if (guest)
+          if (_webLogin)
+            TextButton(
+              onPressed: () => _manualCookie(context),
+              child: const Text('手动 Cookie'),
+            ),
+          if (guest && !optional)
             FilledButton.tonal(
               onPressed: () => _login(context),
               child: const Text('重新登录'),
@@ -3604,7 +3895,7 @@ class _DriveAccountRow extends StatelessWidget {
           else
             FilledButton.tonal(
               onPressed: () => _login(context),
-              child: const Text('网页扫码登录'),
+              child: Text(_webLogin ? '网页扫码登录' : '粘贴 Cookie'),
             ),
         ],
       ),
@@ -4984,6 +5275,17 @@ class _KazumiRulePickerDialogState extends State<_KazumiRulePickerDialog> {
   }
 }
 
+/// TMDB 凭据在设置行上的说明：只说当前用的是哪一种，不显示任何密钥内容。
+String _tmdbCredentialLabel(String apiKey, String readToken) {
+  final credential = TmdbCredential.resolve(
+    apiKey: apiKey,
+    readToken: readToken,
+  );
+  if (credential.isConfigured) return ' · TMDB ${credential.label}';
+  final filled = apiKey.trim().isNotEmpty || readToken.trim().isNotEmpty;
+  return filled ? ' · TMDB 凭据无法识别' : ' · TMDB 未配置';
+}
+
 String _artworkSourceLabel(String raw) =>
     switch (normalizeArtworkPriority(raw)) {
       'tmdb' => 'TMDB',
@@ -4999,6 +5301,7 @@ Future<void> _openArtworkSettings(BuildContext context, AppState app) async {
         app.playerSettings.artworkPriority,
       ),
       initialKey: app.playerSettings.tmdbApiKey,
+      initialToken: app.playerSettings.tmdbReadToken,
     ),
   );
   if (result == null) return;
@@ -5006,6 +5309,7 @@ Future<void> _openArtworkSettings(BuildContext context, AppState app) async {
     app.playerSettings.copyWith(
       artworkPriority: result.priority,
       tmdbApiKey: result.key,
+      tmdbReadToken: result.token,
     ),
   );
   if (context.mounted) {
@@ -5014,9 +5318,12 @@ Future<void> _openArtworkSettings(BuildContext context, AppState app) async {
 }
 
 class _ArtworkConfig {
-  const _ArtworkConfig(this.priority, this.key);
+  const _ArtworkConfig(this.priority, this.key, this.token);
   final String priority;
+
+  /// v3 API Key（走 query）与 v4 Read Access Token（走 Authorization 头）。
   final String key;
+  final String token;
 }
 
 Future<void> _openBossKeySettings(BuildContext context, AppState app) async {
@@ -5109,10 +5416,12 @@ class _ArtworkSettingsDialog extends StatefulWidget {
   const _ArtworkSettingsDialog({
     required this.initialPriority,
     required this.initialKey,
+    this.initialToken = '',
   });
 
   final String initialPriority;
   final String initialKey;
+  final String initialToken;
 
   @override
   State<_ArtworkSettingsDialog> createState() => _ArtworkSettingsDialogState();
@@ -5120,16 +5429,53 @@ class _ArtworkSettingsDialog extends StatefulWidget {
 
 class _ArtworkSettingsDialogState extends State<_ArtworkSettingsDialog> {
   late String _priority = widget.initialPriority;
+
+  /// 旧版本只有一个输入框；把粘在里面的令牌摆回令牌框，用户一眼看得懂。
+  late final TmdbCredential _initial = TmdbCredential.resolve(
+    apiKey: widget.initialKey,
+    readToken: widget.initialToken,
+  );
   late final TextEditingController _key = TextEditingController(
-    text: widget.initialKey,
+    text: _initial.kind == TmdbCredentialKind.apiKey ? _initial.value : '',
+  );
+  late final TextEditingController _token = TextEditingController(
+    text: _initial.kind == TmdbCredentialKind.readToken ? _initial.value : '',
   );
   bool _probing = false;
   List<ArtworkProbeResult> _results = const [];
   String _probeError = '';
 
+  TmdbCredential get _keyCredential => TmdbCredential.parse(_key.text);
+  TmdbCredential get _tokenCredential => TmdbCredential.parse(_token.text);
+
+  /// 实际生效的那一份：两份都填时优先读访问令牌（走请求头，不把密钥放进 URL）。
+  TmdbCredential get _credential =>
+      TmdbCredential.resolve(apiKey: _key.text, readToken: _token.text);
+
+  /// 填了就必须是对应格式：密钥框里放令牌、令牌框里放密钥都要挡住。
+  bool get _canSave =>
+      (_key.text.trim().isEmpty ||
+          _keyCredential.kind == TmdbCredentialKind.apiKey) &&
+      (_token.text.trim().isEmpty ||
+          _tokenCredential.kind == TmdbCredentialKind.readToken);
+
+  @override
+  void initState() {
+    super.initState();
+    _key.addListener(_onChanged);
+    _token.addListener(_onChanged);
+  }
+
+  void _onChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    _key.removeListener(_onChanged);
+    _token.removeListener(_onChanged);
     _key.dispose();
+    _token.dispose();
     super.dispose();
   }
 
@@ -5141,9 +5487,16 @@ class _ArtworkSettingsDialogState extends State<_ArtworkSettingsDialog> {
       _results = const [];
     });
     try {
-      // 测试前先保存 Key，否则服务读到的还是旧配置。
+      // 测试前先保存凭据，否则服务读到的还是旧配置。
       await app.setPlayerSettings(
-        app.playerSettings.copyWith(tmdbApiKey: _key.text.trim()),
+        app.playerSettings.copyWith(
+          tmdbApiKey: _keyCredential.kind == TmdbCredentialKind.apiKey
+              ? _keyCredential.value
+              : '',
+          tmdbReadToken: _tokenCredential.kind == TmdbCredentialKind.readToken
+              ? _tokenCredential.value
+              : '',
+        ),
       );
       final results = await app.artworkService.probe('流浪地球', year: '2019');
       if (mounted) setState(() => _results = results);
@@ -5202,19 +5555,75 @@ class _ArtworkSettingsDialogState extends State<_ArtworkSettingsDialog> {
                 ),
               ),
               const SizedBox(height: 16),
-              Text('TMDB API Key / Token', style: theme.textTheme.labelMedium),
+              Text('TMDB 凭据（填一个即可）', style: theme.textTheme.labelMedium),
               const SizedBox(height: 6),
               TextField(
                 controller: _key,
                 decoration: const InputDecoration(
-                  hintText: 'v3 API Key，或 v4 Read Access Token（eyJ 开头）',
+                  labelText: 'API 密钥（v3）',
+                  hintText: '32 位十六进制，请求时作为 api_key 参数',
                 ),
               ),
-              const SizedBox(height: 6),
+              if (_key.text.trim().isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  _keyCredential.kind == TmdbCredentialKind.apiKey
+                      ? '格式正确：32 位 API 密钥，请求时作为 api_key 参数。'
+                      : (_keyCredential.kind == TmdbCredentialKind.readToken
+                            ? '这是读访问令牌，请填到下面的「API 读访问令牌」框。'
+                            : _keyCredential.problem),
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: _keyCredential.kind == TmdbCredentialKind.apiKey
+                        ? theme.colorScheme.primary
+                        : theme.colorScheme.error,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 14),
+              TextField(
+                controller: _token,
+                minLines: 1,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                  labelText: 'API 读访问令牌（v4）',
+                  hintText: 'eyJ 开头的长串，请求时放在 Authorization 头',
+                ),
+              ),
+              if (_token.text.trim().isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  _tokenCredential.kind == TmdbCredentialKind.readToken
+                      ? '格式正确：读访问令牌，请求时放在 Authorization 头里。'
+                      : (_tokenCredential.kind == TmdbCredentialKind.apiKey
+                            ? '这是 v3 API 密钥，请填到上面的「API 密钥」框。'
+                            : _tokenCredential.problem),
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: _tokenCredential.kind == TmdbCredentialKind.readToken
+                        ? theme.colorScheme.primary
+                        : theme.colorScheme.error,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+              if (_keyCredential.kind == TmdbCredentialKind.apiKey &&
+                  _tokenCredential.kind == TmdbCredentialKind.readToken) ...[
+                const SizedBox(height: 6),
+                Text(
+                  '两份都有效：实际使用 ${_credential.label}（令牌优先）。',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.colorScheme.primary,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 8),
               Text(
-                '在 TMDB 账号设置 → API 中申请。留空则跳过 TMDB，仍会使用豆瓣 / IMDb。',
+                '两个值在 TMDB 后台都能拿到，填一个就够；都填时优先用读访问令牌'
+                '（令牌走请求头，密钥不会出现在 URL 里）。整段粘贴也行，会自动去掉 Bearer 前缀。',
                 style: theme.textTheme.labelSmall?.copyWith(
                   color: theme.colorScheme.onSurface.withValues(alpha: 0.52),
+                  height: 1.4,
                 ),
               ),
               const SizedBox(height: 18),
@@ -5320,9 +5729,20 @@ class _ArtworkSettingsDialogState extends State<_ArtworkSettingsDialog> {
           child: const Text('取消'),
         ),
         FilledButton(
-          onPressed: () =>
-              Navigator.of(context)
-                  .pop(_ArtworkConfig(_priority, _key.text.trim())),
+          // 填了却对不上格式（或填错了框）时不让保存，避免存一份用不了的凭据。
+          onPressed: _canSave
+              ? () => Navigator.of(context).pop(
+                  _ArtworkConfig(
+                    _priority,
+                    _keyCredential.kind == TmdbCredentialKind.apiKey
+                        ? _keyCredential.value
+                        : '',
+                    _tokenCredential.kind == TmdbCredentialKind.readToken
+                        ? _tokenCredential.value
+                        : '',
+                  ),
+                )
+              : null,
           child: const Text('保存'),
         ),
       ],
@@ -5428,13 +5848,14 @@ String _driveAccountsSubtitle(AppState app) {
   if (signed.isEmpty) {
     final stale = [
       for (final entry in driveProviderNames.entries)
-        if ((app.driveAccounts[entry.key]?.cookie ?? '').trim().isNotEmpty &&
+        if (!AppState.isOptionalDriveProvider(entry.key) &&
+            (app.driveAccounts[entry.key]?.cookie ?? '').trim().isNotEmpty &&
             app.driveAccounts[entry.key]?.extra['guest'] == 'true')
           entry.value,
     ];
     return stale.isEmpty
-        ? '未登录 · 点击扫码配置夸克 / UC / 百度'
-        : '${stale.join(' / ')} 登录已失效，点击重新扫码';
+        ? '未登录 · 点击扫码或粘贴 Cookie 配置夸克 / UC / 百度 / 115 / 哔哩'
+        : '${stale.join(' / ')} 登录已失效，点击重新配置';
   }
   final usernames = [
     for (final entry in driveProviderNames.entries)
@@ -6699,10 +7120,7 @@ Future<void> _editProxy(BuildContext context) async {
   if (config == null) return;
   await app.setProxy(config);
   if (context.mounted) {
-    _settingsSnack(
-      context,
-      config.enabled ? '代理已启用：${config.summary}' : '已关闭内置代理',
-    );
+    _settingsSnack(context, '网络代理：${ProxyRuntime.instance.summary}');
   }
 }
 
@@ -6716,6 +7134,7 @@ class _ProxyDialog extends StatefulWidget {
 
 class _ProxyDialogState extends State<_ProxyDialog> {
   late bool _enabled = widget.initial.enabled;
+  late bool _followSystem = widget.initial.followSystem;
   late String _type = widget.initial.type;
   late final TextEditingController _host = TextEditingController(
     text: widget.initial.host,
@@ -6730,6 +7149,21 @@ class _ProxyDialogState extends State<_ProxyDialog> {
     text: widget.initial.password,
   );
   String _error = '';
+  bool _diagnosing = false;
+  List<String> _diagnosis = const [];
+
+  Future<void> _diagnose() async {
+    setState(() {
+      _diagnosing = true;
+      _diagnosis = const [];
+    });
+    final lines = await ProxyRuntime.instance.diagnose();
+    if (!mounted) return;
+    setState(() {
+      _diagnosing = false;
+      _diagnosis = lines;
+    });
+  }
 
   @override
   void dispose() {
@@ -6743,13 +7177,16 @@ class _ProxyDialogState extends State<_ProxyDialog> {
   void _save() {
     final host = _host.text.trim();
     final port = int.tryParse(_port.text.trim()) ?? 0;
-    if (_enabled && (host.isEmpty || port <= 0 || port > 65535)) {
+    if (_enabled &&
+        !_followSystem &&
+        (host.isEmpty || port <= 0 || port > 65535)) {
       setState(() => _error = '请填写有效的代理地址和端口（1-65535）');
       return;
     }
     Navigator.of(context).pop(
       ProxyConfig(
-        enabled: _enabled,
+        enabled: _enabled && !_followSystem,
+        followSystem: _followSystem,
         type: _type,
         host: host,
         port: port,
@@ -6772,12 +7209,26 @@ class _ProxyDialogState extends State<_ProxyDialog> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               SwitchListTile.adaptive(
+                value: _followSystem,
+                onChanged: (v) => setState(() {
+                  _followSystem = v;
+                  _error = '';
+                }),
+                title: const Text('跟随系统代理'),
+                subtitle: const Text(
+                  '用 Windows「局域网设置」或 HTTPS_PROXY 环境变量里的代理（Clash / v2rayN 开系统代理即生效）；'
+                  '连 api.themoviedb.org 这类域名必须走它',
+                ),
+                contentPadding: EdgeInsets.zero,
+              ),
+              SwitchListTile.adaptive(
                 value: _enabled,
                 onChanged: (v) => setState(() {
                   _enabled = v;
+                  if (v) _followSystem = false;
                   _error = '';
                 }),
-                title: const Text('启用代理'),
+                title: const Text('使用手动代理'),
                 subtitle: const Text('HTTP / SOCKS5 上联；本机 127.0.0.1 始终直连'),
                 contentPadding: EdgeInsets.zero,
               ),
@@ -6789,12 +7240,14 @@ class _ProxyDialogState extends State<_ProxyDialog> {
                   ButtonSegment(value: 'socks5', label: Text('SOCKS5')),
                 ],
                 selected: {_type},
-                onSelectionChanged: (value) =>
-                    setState(() => _type = value.first),
+                onSelectionChanged: _followSystem
+                    ? null
+                    : (value) => setState(() => _type = value.first),
               ),
               const SizedBox(height: 12),
               TextField(
                 controller: _host,
+                enabled: !_followSystem,
                 decoration: const InputDecoration(
                   labelText: '服务器地址',
                   hintText: '127.0.0.1 或代理域名',
@@ -6803,6 +7256,7 @@ class _ProxyDialogState extends State<_ProxyDialog> {
               const SizedBox(height: 8),
               TextField(
                 controller: _port,
+                enabled: !_followSystem,
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
                   labelText: '端口',
@@ -6812,6 +7266,7 @@ class _ProxyDialogState extends State<_ProxyDialog> {
               const SizedBox(height: 8),
               TextField(
                 controller: _user,
+                enabled: !_followSystem,
                 decoration: const InputDecoration(
                   labelText: '用户名（可选）',
                   hintText: '代理开启认证时填写',
@@ -6820,9 +7275,33 @@ class _ProxyDialogState extends State<_ProxyDialog> {
               const SizedBox(height: 8),
               TextField(
                 controller: _pass,
+                enabled: !_followSystem,
                 obscureText: true,
                 decoration: const InputDecoration(labelText: '密码（可选）'),
               ),
+              const SizedBox(height: 10),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: _diagnosing ? null : _diagnose,
+                  icon: _diagnosing
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.network_check_rounded, size: 18),
+                  label: Text(_diagnosing ? '正在自检…' : '代理自检'),
+                ),
+              ),
+              for (final line in _diagnosis)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(
+                    line,
+                    style: theme.textTheme.bodySmall?.copyWith(height: 1.4),
+                  ),
+                ),
               if (_error.isNotEmpty) ...[
                 const SizedBox(height: 10),
                 Text(

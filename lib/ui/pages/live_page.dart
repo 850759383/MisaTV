@@ -8,10 +8,11 @@ import '../../models/site_config.dart';
 import '../../services/file_dialog_service.dart';
 import '../../services/live/epg.dart';
 import '../../services/live/live_export.dart';
+import '../open_player.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/mouse_drag_scroll.dart';
 import '../widgets/glass.dart';
 import '../widgets/hover_marquee_text.dart';
-import 'live_player_page.dart';
 
 class LivePage extends StatefulWidget {
   const LivePage({super.key});
@@ -267,30 +268,34 @@ class _LivePageState extends State<LivePage> {
                       narrow ? 18 : 28,
                       8,
                     ),
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: [
-                          Text(
-                            '直播订阅',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onSurface.withValues(
-                                alpha: 0.55,
+                    child: ScrollConfiguration(
+                      behavior: const MouseDragScrollBehavior(),
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            Text(
+                              '直播订阅',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: theme.colorScheme.onSurface.withValues(
+                                  alpha: 0.55,
+                                ),
                               ),
                             ),
-                          ),
-                          const SizedBox(width: 8),
-                          for (final profile in app.liveProfiles)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: ChoiceChip(
-                                label: Text(profile.name),
-                                selected: app.activeLiveProfileId == profile.id,
-                                onSelected: (_) =>
-                                    app.setActiveLiveProfile(profile.id),
+                            const SizedBox(width: 8),
+                            for (final profile in app.liveProfiles)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: ChoiceChip(
+                                  label: Text(profile.name),
+                                  selected:
+                                      app.activeLiveProfileId == profile.id,
+                                  onSelected: (_) =>
+                                      app.setActiveLiveProfile(profile.id),
+                                ),
                               ),
-                            ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -302,29 +307,33 @@ class _LivePageState extends State<LivePage> {
                       narrow ? 18 : 28,
                       10,
                     ),
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: [
-                          Text(
-                            '直播线路',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onSurface.withValues(
-                                alpha: 0.55,
+                    child: ScrollConfiguration(
+                      behavior: const MouseDragScrollBehavior(),
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            Text(
+                              '直播线路',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: theme.colorScheme.onSurface.withValues(
+                                  alpha: 0.55,
+                                ),
                               ),
                             ),
-                          ),
-                          const SizedBox(width: 8),
-                          for (var i = 0; i < lives.length; i++)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: ChoiceChip(
-                                label: Text(lives[i].displayName),
-                                selected: app.activeLiveIndex == i,
-                                onSelected: (_) => app.setActiveLive(lives[i]),
+                            const SizedBox(width: 8),
+                            for (var i = 0; i < lives.length; i++)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: ChoiceChip(
+                                  label: Text(lives[i].displayName),
+                                  selected: app.activeLiveIndex == i,
+                                  onSelected: (_) =>
+                                      app.setActiveLive(lives[i]),
+                                ),
                               ),
-                            ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -391,20 +400,19 @@ class _LivePageState extends State<LivePage> {
     LiveChannel channel,
     LiveLine line,
   ) async {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => LivePlayerPage(
-          bean: bean,
-          channel: channel,
-          initialLine: line,
-          epg: entryOf(_epg, epgRefOf(channel)),
-          groups: _groups,
-          epgEntries: _epg,
-          initialGroup: _groups.isEmpty
-              ? ''
-              : _groups[_groupIndex.clamp(0, _groups.length - 1)].group,
-        ),
-      ),
+    final app = AppScope.of(context);
+    await openLivePlayer(
+      context,
+      app,
+      bean: bean,
+      channel: channel,
+      initialLine: line,
+      epg: entryOf(_epg, epgRefOf(channel)),
+      groups: _groups,
+      epgEntries: _epg,
+      initialGroup: _groups.isEmpty
+          ? ''
+          : _groups[_groupIndex.clamp(0, _groups.length - 1)].group,
     );
   }
 }
@@ -519,22 +527,25 @@ class _MobileBody extends StatelessWidget {
       children: [
         SizedBox(
           height: 40,
-          child: ListView(
-            padding: const EdgeInsets.symmetric(horizontal: 18),
-            scrollDirection: Axis.horizontal,
-            children: [
-              for (var i = 0; i < groups.length; i++)
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: ChoiceChip(
-                    label: Text(
-                      '${groups[i].group} ${groups[i].channels.length}',
+          child: ScrollConfiguration(
+            behavior: const MouseDragScrollBehavior(),
+            child: ListView(
+              padding: const EdgeInsets.symmetric(horizontal: 18),
+              scrollDirection: Axis.horizontal,
+              children: [
+                for (var i = 0; i < groups.length; i++)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ChoiceChip(
+                      label: Text(
+                        '${groups[i].group} ${groups[i].channels.length}',
+                      ),
+                      selected: groupIndex == i,
+                      onSelected: (_) => onGroup(i),
                     ),
-                    selected: groupIndex == i,
-                    onSelected: (_) => onGroup(i),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 8),
